@@ -294,7 +294,24 @@ def cmd_scr():
 # ---------------------------------------------------------------- MOT
 
 def parse_mot_walk(chunk, start, end):
-    """Full MOT walk per chihuahua pkg/mot (sig 'mtb3', records x12B, curve ranges)."""
+    """Full MOT walk — spec turunkan dari kode game (FUN_001578xx memcmp 'mtb3' +
+    sampler 0x1595f8) + invariant empiris di SELURUH 27.192 chunk:
+
+    header  : u32 sig 'mtb3', u16 frame_total, u8 record_total, u8 loop
+    record  : u8 target, u8 channel, u16 curve_total, [u32 use_global], u32 payload
+              -> stride 12B (dengan use_global) ATAU 8B (tanpa) — stride otomatis
+                 dipilih: stride 12B hanya diterima kalau tabel + seluruh stream
+                 valid; 4 chunk em26.dat hanya valid dengan stride 8B.
+    channel : enc = channel & 0xF0 ; component = channel & 0x0F
+              0x00 = constant  (payload = float32 bits)
+              0x10 = hermite   (payload = offset data; block = 12B header + 4*ct)
+              0x30 = varian    (payload = offset data; block = 24B + 8*ct
+                                = 2x ukuran block hermite)  [baru, 165 rec]
+              0xFF = sentinel  (rec terakhir; payload diabaikan)
+    stream  : block data membentuk stream KONTIGU — payload rec data pertama
+              == table_end, tiap payload berikutnya == akhir block sebelumnya.
+              (invariant ini terverifikasi 26.919/26.919 chunk mtb3)
+    """
     n = end - start
     if n < 8:
         raise ValueError("mot<8")
@@ -304,46 +321,131 @@ def parse_mot_walk(chunk, start, end):
     frame_total, record_total, loop = struct.unpack_from("<HBB", chunk, start + 4)
     if record_total == 0:
         raise ValueError("record_total=0")
-    table_end = 8 + record_total * 12
-    if table_end > n:
-        raise ValueError("record table past end")
-    channels = []
-    curves_sum = 0
-    hermite = const = sentinel = 0
-    p = start + 8
-    data_offsets = []
-    for r in range(record_total):
-        target, channel, curve_total, use_global, payload = struct.unpack_from("<BBHII", chunk, p)
-        p += 12
-        enc = channel & 0xF0
-        channels.append(channel)
-        if channel == 0xFF:
-            sentinel += 1
-            data_offsets.append(None)
+    last_err = None
+    for stride in (12, 8):
+        table_end = 8 + record_total * stride
+        if table_end > n:
+            last_err = "record table past end"
             continue
+        recs = []
+        p = start + 8
+        for _ in range(record_total):
+            if stride == 12:
+                target, channel, ct, _ug, payload = struct.unpack_from("<BBHII", chunk, p)
+            else:
+                target, channel, ct, payload = struct.unpack_from("<BBHI", chunk, p)
+            recs.append((target, channel, ct, payload))
+            p += stride
+        cur = table_end
+        channels = collections.Counter()
+        hermite = const = sentinel = curves = v30 = 0
+        stream_ok = True
+        for i, (target, channel, ct, payload) in enumerate(recs):
+            channels[channel] += 1
+            if channel == 0xFF:
+                sentinel += 1
+                continue
+            enc = channel & 0xF0
+            if enc == 0x00:
+                const += 1
+                continue
+            if enc == 0x10:
+                sz = 12 + 4 * ct
+                hermite += 1
+                curves += ct
+            elif enc == 0x30:
+                sz = 24 + 8 * ct          # == 2 x block hermite (terverifikasi 165 rec)
+                v30 += 1
+                curves += ct
+            else:
+                last_err = f"unsupported encoding 0x{enc:02X} ch={channel}"
+                stream_ok = False
+                break
+            if payload != cur:            # stream kontigu = invariant utama
+                last_err = f"stream gap rec{i} payload={payload} expect={cur}"
+                stream_ok = False
+                break
+            cur += sz
+            if cur > n:
+                last_err = f"data past end rec{i}"
+                stream_ok = False
+                break
+        if stream_ok:
+            return dict(frames=frame_total, records=record_total, loop=loop, stride=stride,
+                        hermite=hermite, constant=const, sentinel=sentinel, v30=v30,
+                        curves=curves, data_end=cur, slack=n - cur, channels=channels)
+    raise ValueError(last_err or "walk failed")
+
+
+def parse_mq_walk(chunk, start, end):
+    """Varian 'mq' (273 chunk, sig 'mq'+u16 ct) — layout turunkan empiris 273/273:
+
+      header : u16 'mq', u16 curve_total(ct), u16 6919 (konstan lintas chunk = tag
+               build alat), u8, u8(loop-ish)
+      table  : 15 x record 8B {u8 target, u8 channel, u16 ct, u32 payload}
+               (6 hermite + 1 sentinel + 8 constant pada sampel; channel pakai
+               aturan yang sama dgn mtb3)
+      entries: 26 x 64B {u8 idx(1..25), u8 0, u16 ct, u32 offs[4] (0 = null),
+               u8 flags[4] (0xFF = channel absen), 10 x f32}
+               entry terakhir = sentinel {idx=127, ct=0xFFFF}
+      data   : stream block hermite kontigu mulai tepat setelah entry table;
+               sisa ekor = blok channel terkompres (per target, ~ct byte/offset,
+               BELUM didecode — dihitung sbg slack, bukan error)
+    """
+    n = end - start
+    if n < 8:
+        raise ValueError("mq<8")
+    sig_lo, ct_hdr, tag, b6, b7 = struct.unpack_from("<5H", chunk, start)
+    if (sig_lo & 0xFF) != 0x6D or (sig_lo >> 8) != 0x71:
+        raise ValueError(f"mq sig {sig_lo:#x}")
+    N = M = None
+    tbl8 = 8 + 8 * 15
+    # N=15 record 8B terverifikasi seragam; M diturunkan dari pola entry table
+    recs = [struct.unpack_from("<BBHI", chunk, start + 8 + i * 8) for i in range(15)]
+    dstart = None
+    for tgt, ch, ct, pl in recs:
+        if ch == 0xFF:
+            continue
+        if (ch & 0xF0) == 0x10:
+            dstart = pl
+            break
+    if dstart is None or dstart < tbl8 or (dstart - tbl8) % 64:
+        raise ValueError("mq: data start tidak setelah entry table")
+    M = (dstart - tbl8) // 64
+    if M < 2 or M > 200:
+        raise ValueError(f"mq: M={M} di luar rentang")
+    for k in range(M):
+        idx, unk, ctt = struct.unpack_from("<BBH", chunk, start + tbl8 + k * 64)
+        if k < M - 1:
+            if idx != k + 1 or ctt != ct_hdr:
+                raise ValueError(f"mq entry[{k}] pattern idx={idx} ct={ctt}")
+        elif idx != 127 or ctt != 0xFFFF:
+            raise ValueError("mq: entry sentinel hilang")
+    cur = dstart
+    hermite = const = sentinel = 0
+    channels = collections.Counter()
+    for i, (tgt, ch, ct, pl) in enumerate(recs):
+        channels[ch] += 1
+        if ch == 0xFF:
+            sentinel += 1
+            continue
+        enc = ch & 0xF0
         if enc == 0x00:
             const += 1
-            data_offsets.append(None)
             continue
-        if enc == 0x10:
-            hermite += 1
-            data_offsets.append((payload, curve_total))
-            curves_sum += curve_total
-            continue
-        raise ValueError(f"unsupported encoding 0x{enc:02X} ch={channel}")
-    for item in data_offsets:
-        if item is None:
-            continue
-        off, ct = item
-        if off is None:
-            continue
-        dsz = 12 + ct * 4
-        if off < table_end or off + dsz > n:
-            raise ValueError(f"data range {off:#x}+{dsz:#x} outside mot size {n:#x}")
-        struct.unpack_from("<6H", chunk, start + off)
-    return dict(frames=frame_total, records=record_total, loop=loop,
-                hermite=hermite, constant=const, sentinel=sentinel,
-                curves=curves_sum, channels=collections.Counter(channels))
+        if enc != 0x10:
+            raise ValueError(f"mq: encoding 0x{enc:02X}")
+        if pl != cur:
+            raise ValueError(f"mq: stream gap rec{i} pl={pl} expect={cur}")
+        cur = pl + 12 + 4 * ct
+        if cur > n:
+            raise ValueError("mq: data past end")
+        hermite += 1
+    N = 15
+    return dict(frames=tag, records=N, loop=b6, stride=8, hermite=hermite,
+                constant=const, sentinel=sentinel, v30=0, curves=0,
+                data_end=cur, slack=n - cur, channels=channels,
+                mq=M, mq_tag=tag, mq_ct=ct_hdr, mq_b7=b7)
 
 
 def cmd_mot():
@@ -353,34 +455,49 @@ def cmd_mot():
     ch_hist = collections.Counter()
     stats = []
     n_found = 0
+    n_mtb3 = n_mq = 0
+    stride_hist = collections.Counter()
+    v30_total = 0
+    slack_total = 0
     for name, data, s, e in find_chunks(rows, "MOT"):
         n_found += 1
+        is_mq = data[s:s + 2] == b"mq"
         try:
-            m = parse_mot_walk(data, s, e)
+            m = (parse_mq_walk if is_mq else parse_mot_walk)(data, s, e)
             ok += 1
+            n_mq += is_mq
+            n_mtb3 += (not is_mq)
+            stride_hist[m["stride"]] += 1
+            v30_total += m["v30"]
+            slack_total += m["slack"]
             ch_hist.update(m["channels"])
-            stats.append((name, e - s, m["frames"], m["records"], m["loop"],
-                          m["hermite"], m["constant"], m["sentinel"], m["curves"]))
+            stats.append((name, s, e - s, "mq" if is_mq else "mtb3", m["stride"],
+                          m["frames"], m["records"], m["loop"],
+                          m["hermite"], m["constant"], m["sentinel"], m["v30"],
+                          m["curves"], m["data_end"], m["slack"]))
         except ValueError as ex:
             fail += 1
             errors[str(ex)[:70]] += 1
     print(f"MOT chunks: {n_found}  full-walk OK: {ok}  FAIL: {fail}")
+    print(f"  variant: mtb3={n_mtb3}  mq={n_mq} | stride 12B={stride_hist[12]} 8B={stride_hist[8]}")
+    print(f"  encoding 0x30 records: {v30_total} | tail slack bytes total: {slack_total}")
     if errors:
         print("errors:", dict(errors))
     if stats:
-        rt = [s[3] for s in stats]
+        rt = [s[6] for s in stats]
         print(f"records/chunk: min={min(rt)} max={max(rt)} mean={sum(rt)/len(rt):.1f}")
-        ft = [s[2] for s in stats]
-        print(f"frames/chunk : min={min(ft)} max={max(ft)} mean={sum(ft)/len(ft):.1f}")
-        print("channel census (enc<<4|component):", dict(sorted(ch_hist.items())))
-        print("samples (file, bytes, frames, records, loop, hermite, const, sentinel, curves):")
+        ft = [s[5] for s in stats if s[3] == "mtb3"]
+        print(f"frames/chunk (mtb3): min={min(ft)} max={max(ft)} mean={sum(ft)/len(ft):.1f}")
+        print("channel census (channel byte):", dict(sorted(ch_hist.items())))
+        print("samples (file, off, bytes, var, stride, frames, records, loop, herm, const, sent, v30, curves, data_end, slack):")
         for s in stats[:6]:
             print("   ", s)
     out = os.path.join(OUT_DIR, "mot_headers.csv")
     with open(out, "w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["file", "chunk_bytes", "frames", "records", "loop",
-                    "hermite", "constant", "sentinel", "curves"])
+        w.writerow(["file", "chunk_off", "chunk_bytes", "variant", "stride",
+                    "frames", "records", "loop", "hermite", "constant",
+                    "sentinel", "v30", "curves", "data_end", "slack"])
         w.writerows(stats)
     print(f"csv -> {out}")
     return ok, fail
