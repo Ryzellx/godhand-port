@@ -22,7 +22,9 @@ def load_named():
 
 def walk_afd(data):
     """AFD = {u32 total, u32 header_size(=16)} + total x record 32B.
-    Invariant: size == 16 + 32*total. Field u32@4 = 16 di 187/187 file."""
+    Invariant: size == 16 + 32*total. Field u32@4 = 16 di 187/187 file.
+    Varian payload (core.afd): u32@8 = offset payload inline (== 16+32*total),
+    u32@12 = 0 — file AFD dengan blob data menempel di belakang tabel."""
     if len(data) < 16:
         raise ValueError("afd<16")
     total, hdr = struct.unpack_from("<II", data, 0)
@@ -31,11 +33,15 @@ def walk_afd(data):
     need = 16 + 32 * total
     if need > len(data):
         raise ValueError(f"afd table past end ({need} > {len(data)})")
+    pay_off, pay_pad = struct.unpack_from("<II", data, 8)
+    inline = (pay_off != 0 and pay_off == need and pay_pad == 0)
     recs = [struct.unpack_from("<6I2H", data, 16 + i * 32) for i in range(total)]
     # field "48000" (u16@+12 rec) = sample-rate-like, dicek konsistensi
     rate = collections.Counter(r[6] & 0xFFFF for r in recs)
-    return dict(total=total, hdr=hdr, exact=(need == len(data)), size=len(data),
-                table_end=need, slack=len(data) - need, rate=rate.most_common(3),
+    return dict(total=total, hdr=hdr, exact=(need == len(data) or inline), size=len(data),
+                table_end=need, slack=len(data) - need if not inline else 0,
+                inline_payload=inline, payload_size=len(data) - need if inline else 0,
+                rate=rate.most_common(3),
                 unk=recs[0][5] if recs else 0)
 
 
