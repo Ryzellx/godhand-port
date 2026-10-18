@@ -43,6 +43,7 @@ struct Stats {
     u64 kicks = 0;          // berapa kali CHCR STR di-set & transfer jalan
     u64 qwords = 0;         // total qword terkirim ke sink GIF
     u64 chcr_polls = 0;     // berapa kali CHCR dibaca (poll busy)
+    u64 vif_polls = 0;      // berapa kali VIF_STAT0 dibaca (poll drain)
     u64 mmio_other = 0;     // tulis/baca MMIO di luar DMA ch2 (trace, bukan error)
     u32 last_madr = 0, last_qwc = 0, last_chcr = 0;
     bool last_tte = false;  // bit31 TTE pada kick terakhir

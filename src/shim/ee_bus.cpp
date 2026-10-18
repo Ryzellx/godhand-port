@@ -11,6 +11,7 @@ namespace {
 
 std::vector<u8> g_ram;      // lazily allocated 32 MB
 u32 g_chcr = 0, g_madr = 0, g_qwc = 0, g_tadr = 0;
+u64 g_vif_polls = 0;      // VIF_STAT0 poll counter (sintesis bit 0x200)
 Stats g_stats;
 
 std::vector<u8>& ram() {
@@ -91,6 +92,14 @@ u32 mmio_read32(u32 addr) {
     case CH2_MADR: return g_madr;
     case CH2_QWC:  return g_qwc;
     case CH2_TADR: return g_tadr;
+    // VIF_STAT0 (0x10008000): crt0 init libkernel polling bit 0x200 (VIF1 fifo
+    // drain/finish) utk proceed — di HW asli ke-set saat VIF/DMA selesai. Native:
+    // synthesizer deterministik — poll-poll-poll lalu DONE sekali (mirip sinkron
+    // GIF CHCR di atas). Tanpa ini boot nge-spin 71M iter di jr-ra loop @0x3b690c.
+    case 0x10008000:
+        g_vif_polls++;
+        g_stats.vif_polls++;
+        return (g_vif_polls >= 8) ? 0x200u : 0u;
     default:
         g_stats.mmio_other++;
         return 0;

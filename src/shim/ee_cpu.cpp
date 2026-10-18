@@ -134,10 +134,12 @@ static inline void fset(Cpu& c, u32 i, float v) { u32 b; std::memcpy(&b, &v, 4);
 
 bool run(Cpu& c, SyscallFn handler, u64 max_inst) {
     while (c.instret < max_inst) {
+        u32 cur_pc = c.pc;
         u32 inst = eebus::read32(c.pc);
         c.pc = c.next_pc;             // delay slot semantics: slot sudah diprefetch
         c.next_pc = c.pc + 4;
         c.fault_op = inst;
+        if (c.trace) c.trace[c.trace_pos = (c.trace_pos + 1) & c.trace_mask] = cur_pc;
 
         auto fault = [&](const char* why) { c.fault = why; c.fault_pc = c.pc; };
 
@@ -170,23 +172,29 @@ bool run(Cpu& c, SyscallFn handler, u64 max_inst) {
             }
             case 0x0D: fault("break"); return true;
             case 0x0F: break;   // SYNC
-            case 0x10: w64(c, rd(inst), c.hi[0]); break;   // MFHI
-            case 0x11: c.hi[0] = g64(c, rs(inst)); break;  // MTHI
-            case 0x12: w64(c, rd(inst), c.lo[0]); break;   // MFLO
-            case 0x13: c.lo[0] = g64(c, rs(inst)); break;  // MTLO
+            case 0x10: { u64 v = (u64)c.hi[0] | ((u64)c.hi[1] << 32); w64(c, rd(inst), v); break; } // MFHI
+            case 0x11: { u64 v = g64(c, rs(inst)); c.hi[0] = (u32)v; c.hi[1] = (u32)(v >> 32); break; } // MTHI
+            case 0x12: { u64 v = (u64)c.lo[0] | ((u64)c.lo[1] << 32); w64(c, rd(inst), v); break; } // MFLO
+            case 0x13: { u64 v = g64(c, rs(inst)); c.lo[0] = (u32)v; c.lo[1] = (u32)(v >> 32); break; } // MTLO
             case 0x14: w64(c, rd(inst), g64(c, rt(inst)) << (c.r[rs(inst)][0] & 63)); break; // dsllv
             case 0x16: w64(c, rd(inst), g64(c, rt(inst)) >> (c.r[rs(inst)][0] & 63)); break; // dsrlv
             case 0x17: w64(c, rd(inst), (u64)((s64)g64(c, rt(inst)) >> (c.r[rs(inst)][0] & 63))); break; // dsrav
             case 0x18: { s64 p = (s64)(s32)c.r[rs(inst)][0] * (s32)c.r[rt(inst)][0];
-                         c.lo[0] = (u64)(s64)(s32)(u32)p; c.hi[0] = (u64)(s64)(s32)((u64)p >> 32); break; } // mult
+                         c.lo[0] = (u32)p; c.lo[1] = (u32)((s64)(s32)(u32)p >> 32);
+                         c.hi[0] = (u32)((u64)p >> 32); c.hi[1] = (u32)((s64)(s32)((u64)p >> 32) >> 32); break; } // mult
             case 0x19: { u64 p = (u64)c.r[rs(inst)][0] * c.r[rt(inst)][0];
-                         c.lo[0] = (u64)(s64)(s32)(u32)p; c.hi[0] = (u64)(s64)(s32)((u64)p >> 32); break; } // multu
+                         c.lo[0] = (u32)p; c.lo[1] = (u32)((s64)(s32)(u32)p >> 32);
+                         c.hi[0] = (u32)(p >> 32); c.hi[1] = (u32)((s64)(s32)(u32)(p >> 32) >> 32); break; } // multu
             case 0x1A: { s32 a = (s32)c.r[rs(inst)][0], b = (s32)c.r[rt(inst)][0];
                          if (b == 0) { fault("div0"); return true; }
-                         c.lo[0] = (u64)(s64)(s32)(a / b); c.hi[0] = (u64)(s64)(s32)(a % b); break; } // div
+                         s32 q = a / b, r_ = a % b;
+                         c.lo[0] = (u32)q; c.lo[1] = (u32)((s64)q >> 32);
+                         c.hi[0] = (u32)r_; c.hi[1] = (u32)((s64)r_ >> 32); break; } // div
             case 0x1B: { u32 a = c.r[rs(inst)][0], b = c.r[rt(inst)][0];
                          if (b == 0) { fault("divu0"); return true; }
-                         c.lo[0] = (u64)(s64)(s32)(a / b); c.hi[0] = (u64)(s64)(s32)(a % b); break; } // divu
+                         u32 q = a / b, r_ = a % b;
+                         c.lo[0] = q; c.lo[1] = (u32)((s64)(s32)q >> 32);
+                         c.hi[0] = r_; c.hi[1] = (u32)((s64)(s32)r_ >> 32); break; } // divu
             case 0x20: case 0x21: w32(c, rd(inst), c.r[rs(inst)][0] + c.r[rt(inst)][0]); break; // add/addu
             case 0x22: case 0x23: w32(c, rd(inst), c.r[rs(inst)][0] - c.r[rt(inst)][0]); break; // sub/subu
             case 0x24: w32(c, rd(inst), c.r[rs(inst)][0] & c.r[rt(inst)][0]); break;    // and

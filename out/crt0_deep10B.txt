@@ -1,0 +1,6 @@
+crt0 run: instret=10000000000 stop=clean-cap pc=0x003b6984
+syscalls seen: 2 -> 60 61
+syscall census: 60:1 61:1 64:2 90:2 91:1 100:1 115:166666 116:3 | distinct=8 total=166677
+hot-pc top12 (samples=152587/10000000000 instr):
+  0x003b6900 text    n=152587     100.00%
+PASS: crt0 asli dieksekusi CPU — SetupThread->SetupHeap via shim

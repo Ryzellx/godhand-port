@@ -23,7 +23,8 @@ struct Cpu {
     // 32..63 (SD/LD/64-bit MMI); lane2/3 = bits 64..127 (LQ/SQ penuh — memcpy 16B).
     u32 r[32][4]{};
     u32 pc = 0, next_pc = 0;
-    u64 lo[2]{}, hi[2]{};    // LO/HI 128-bit (UD[0]=lo[0], UD[1]=lo1 — MMI mult pipa 0/1)
+    u32 lo[4]{}, hi[4]{};     // HI/LO 128-bit per ELEMEN u32 (UL[0..3]; persis layout PCSX2:
+                              // lo[0..1] = pipe0 low64, lo[2..3] = pipe1 high64 — MMI mult pipeline)
     u32 sa = 0;              // Save Address (MTSA/MFSA/MTSAB — 10 bit di EE)
     u32 f[32]{};             // FPR 32-bit single (EE FPU = single only)
     u32 facc = 0;            // FPU accumulator (ADDA/MULA/MADD.S family)
@@ -43,6 +44,11 @@ struct Cpu {
     // backward-taken-branch census: hitung SETIAP kali branch/jump mundur dieksekusi
     // (tanpa sampling — nol aliasing). Bucket = alamat instruksi branch (pc-4)>>2.
     u64* btb = nullptr;               // nullptr = BTB census mati; 2^21 bucket u64
+    // trace ring PC (opsional): catat pc tiap instruksi ke ring buffer 2^k entry
+    // (dipakai crt0_test utk diagnosis spin loop — dump N PC terakhir pasca-run).
+    u32* trace = nullptr;             // nullptr = trace mati
+    u32  trace_mask = 0;              // size-1; indeks = instret & mask
+    u32  trace_pos = 0;               // posisi tulis berikutnya (wraps)
 
     void reset(u32 entry);
     u32  get(u32 i) const { return r[i][0]; }

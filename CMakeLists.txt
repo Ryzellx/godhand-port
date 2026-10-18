@@ -20,6 +20,15 @@ add_executable(godhand_slice
 target_include_directories(godhand_slice PRIVATE src/gif src/gs src/vk)
 target_link_libraries(godhand_slice PRIVATE Vulkan::Vulkan)
 
+# pl00_render: render model Gene dari disc -> GIF -> GS -> Vulkan -> PPM
+add_executable(pl00_render
+  src/slice/pl00_render.cpp
+  src/gif/gif.cpp
+  src/gs/gs_state.cpp
+  src/vk/vk_backend.cpp)
+target_include_directories(pl00_render PRIVATE src/gif src/gs src/vk)
+target_link_libraries(pl00_render PRIVATE Vulkan::Vulkan)
+
 # 3) M5 shim kernel EE (thread/sema/eventflag/file/gif-hook) — portable std::thread
 add_executable(shim_test
   src/shim/shim_test.cpp

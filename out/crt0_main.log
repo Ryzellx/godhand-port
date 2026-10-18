@@ -1,0 +1,14 @@
+timing: 0.00 s (5.3 M inst/s)
+crt0 run: instret=92 stop=opcode unknown pc=0x003b63a4
+syscalls seen: 0 ->
+syscall census: 127:1 | distinct=1 total=1
+hot-pc top12 (samples=0/92 instr):
+backward-branch census top8 (total=6):
+  0x0031db7c n=1
+  0x003a7b50 n=1
+  0x003b682c n=1
+  0x003b7c20 n=1
+  0x003b7ca0 n=1
+  0x003bafd4 n=1
+FAIL: urutan syscall crt0 tidak sesuai
+NOTE: stop dgn fault=opcode unknown @pc=0x003b63a4 op=40036000 (crt0 2 syscall pertama OK)

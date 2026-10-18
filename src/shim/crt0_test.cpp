@@ -129,6 +129,8 @@ static const char* region_of(u32 pc) {
 int main(int argc, char** argv) {
     const char* elf = argc > 1 ? argv[1] : "/root/ports/godhand/extract/SLUS_215.03";
     u64 cap = argc > 2 ? std::strtoull(argv[2], nullptr, 10) : 50'000'000'000ull;
+    u32 trace_dump = argc > 3 ? (u32)std::strtoul(argv[3], nullptr, 10) : 0; // n PC terakhir utk dump
+    static u32 g_trace[1u << 16];    // ring 64K PC (diagnosis spin loop)
     load_elf_into_bus(elf);
 
     // sanity: bytes crt0 persis dari disasm (verified): beq v0,v1 @0x100178
@@ -140,12 +142,16 @@ int main(int argc, char** argv) {
 
     Cpu cpu;
     // PC start post-clear: 0x100198 (blok SetupThread/SetupHeap — gate crt0 asli).
-    cpu.reset(0x100198);
+    cpu.reset(0x31db70);  // main wrapper game asli
     cpu.set_sp(0x02000000);                    // boot stack atas
     cpu.set_gp(0x0063fd48);                    // gp dari crt0: lui a0,0x47; addiu a0,-29456
     cpu.hist = g_hist;
     cpu.sample_mask = 0xFFFFu;                 // sampling tiap 65536 instr
     cpu.btb = g_btb;
+    if (trace_dump) {                 // trace ring aktif — dump N PC terakhir pasca-run
+        cpu.trace = g_trace;
+        cpu.trace_mask = (1u << 16) - 1;
+    }
 
     // "ROM kernel handler area" — di HW asli, ROM kernel EE memasang exception handler
     // di RAM rendah [0x80000000..0x80080000) sebelum crt0; jalur FindAddress walk
@@ -213,6 +219,18 @@ int main(int argc, char** argv) {
                  sec > 0 ? cpu.instret / sec / 1e6 : 0.0);
 
     int fail = 0;
+    // dump N PC terakhir dari trace ring (ring penuh: mulai dari trace_pos — urut kronologis)
+    if (trace_dump && cpu.trace) {
+        u32 sz = cpu.trace_mask + 1;
+        u32 n = trace_dump < sz ? trace_dump : sz;
+        std::printf("trace last %u pc (oldest->newest):\n", n);
+        u32 start = (cpu.trace_pos + sz - n) & cpu.trace_mask;
+        for (u32 i = 0; i < n; i++) {
+            u32 pc = cpu.trace[(start + i) & cpu.trace_mask];
+            std::printf("  [%u] 0x%08x %s op=%08x\n", i, pc, region_of(pc),
+                        eebus::read32(pc));
+        }
+    }
     // bukti minimal: SetupThread (60) DAN SetupHeap (61) kena, berurutan
     if (g_nsys < 2 || g_syscalls_seen[0] != 60 || g_syscalls_seen[1] != 61) {
         std::printf("FAIL: urutan syscall crt0 tidak sesuai\n"); fail = 1;

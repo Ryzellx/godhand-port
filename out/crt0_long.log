@@ -1,0 +1,4 @@
+crt0 run: instret=10000000000 stop=clean-cap pc=0x003b6984
+syscalls seen: 2 -> 60 61
+PASS: crt0 asli dieksekusi CPU — SetupThread->SetupHeap via shim
+CRT0_LONG_RC=0
