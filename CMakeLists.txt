@@ -27,3 +27,13 @@ add_executable(shim_test
 target_include_directories(shim_test PRIVATE src/shim)
 find_package(Threads REQUIRED)
 target_link_libraries(shim_test PRIVATE Threads::Threads)
+
+# 4) Phase 7a — bus EE (RAM + register MMIO DMA ch2 GIF) -> parser GIF -> gs state
+add_executable(bus_test
+  src/shim/bus_test.cpp
+  src/shim/ee_bus.cpp
+  src/shim/ee_kernel.cpp
+  src/gif/gif.cpp
+  src/gs/gs_state.cpp)
+target_include_directories(bus_test PRIVATE src/shim src/gif src/gs)
+target_link_libraries(bus_test PRIVATE Threads::Threads)

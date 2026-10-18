@@ -1,0 +1,102 @@
+// ee_bus.cpp — RAM EE + register DMA ch2 (GIF). Transfer sinkron: kick -> sink GIF
+// (eekern::dma_ch2_kick) -> STR clear, jadi poll busy game (CHCR & 0x100) selalu lolos.
+#include "ee_bus.h"
+#include "ee_kernel.h"
+
+#include <cstring>
+#include <vector>
+
+namespace eebus {
+namespace {
+
+std::vector<u8> g_ram;      // lazily allocated 32 MB
+u32 g_chcr = 0, g_madr = 0, g_qwc = 0, g_tadr = 0;
+Stats g_stats;
+
+std::vector<u8>& ram() {
+    if (g_ram.empty()) g_ram.resize(RAM_SIZE, 0);
+    return g_ram;
+}
+
+// Kick: salin qwc qword dari RAM lalu serahkan ke sink GIF (parser -> GS -> backend)
+void kick(u32 madr, u32 qwc, bool tte) {
+    if (qwc == 0) return;
+    u32 addr = madr & 0x7FFFFFFF & ~0xFu;         // buang TTE (bit31) + align 16B
+    u32 off  = addr & RAM_MASK;
+    // guard: jangan baca melewati window RAM
+    if ((u64)off + (u64)qwc * 16 > (u64)RAM_SIZE) {
+        u32 maxq = (RAM_SIZE - off) / 16;
+        if (maxq == 0) return;
+        qwc = maxq;                                // potong, jangan OOB
+    }
+    eekern::dma_ch2_kick(ram().data() + off, qwc);
+    g_stats.kicks++;
+    g_stats.qwords += qwc;
+    g_stats.last_madr = off;                        // offset RAM final (setelah mask window)
+    g_stats.last_qwc = qwc;
+    g_stats.last_tte = tte;
+}
+
+} // namespace
+
+void reset() {
+    if (!g_ram.empty()) std::memset(g_ram.data(), 0, g_ram.size());
+    g_chcr = g_madr = g_qwc = g_tadr = 0;
+    g_stats = Stats{};
+}
+
+void mem_write(u32 addr, const void* data, size_t n) {
+    if (n == 0) return;
+    u32 off = addr & RAM_MASK;
+    // tulis potongan terakhir boleh dipotong (tanpa wrap — alamat EE tak wrap)
+    size_t avail = (off <= RAM_SIZE) ? (RAM_SIZE - off) : 0;
+    size_t k = n < avail ? n : avail;
+    if (k) std::memcpy(ram().data() + off, data, k);
+}
+
+bool mem_read(u32 addr, void* out, size_t n) {
+    if (n == 0) return true;
+    u32 off = addr & RAM_MASK;
+    if ((u64)off + n > (u64)RAM_SIZE) return false;
+    std::memcpy(out, ram().data() + off, n);
+    return true;
+}
+
+void mmio_write32(u32 addr, u32 val) {
+    switch (addr) {
+    case CH2_QWC:  g_qwc = val & 0xFFFF; break;
+    case CH2_MADR: g_madr = val; break;
+    case CH2_TADR: g_tadr = val; break;
+    case CH2_CHCR: {
+        g_chcr = val;
+        g_stats.last_chcr = val;
+        // STR (bit8) set = start transfer dari MADR sepanjang QWC (mode non-chain,
+        // persis perilaku game: CHCR=0x101 dengan QWC+MADR sudah diisi lebih dulu)
+        if (val & 0x100) {
+            bool tte = (g_madr >> 31) != 0;
+            kick(g_madr, g_qwc, tte);
+            g_chcr = val & ~0x100u;               // sinkron: STR seketika clear
+        }
+        break;
+    }
+    default:
+        g_stats.mmio_other++;                      // MMIO lain (VIF1/SIF/INTC...) — trace dulu
+        break;
+    }
+}
+
+u32 mmio_read32(u32 addr) {
+    switch (addr) {
+    case CH2_CHCR: g_stats.chcr_polls++; return g_chcr;   // STR selalu 0 (sinkron)
+    case CH2_MADR: return g_madr;
+    case CH2_QWC:  return g_qwc;
+    case CH2_TADR: return g_tadr;
+    default:
+        g_stats.mmio_other++;
+        return 0;
+    }
+}
+
+const Stats& stats() { return g_stats; }
+
+} // namespace eebus
