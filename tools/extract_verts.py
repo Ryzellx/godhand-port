@@ -37,7 +37,7 @@ def iter_chunks(data, dat):
         yield dat["types"][i], off, end
 
 def parse_mdb_verts(chunk, mp, end):
-    """Extract vertex positions from MDB at mp. Returns list of (x,y,z) floats."""
+    """Extract vertex positions + UVs from MDB at mp. Returns list of (x,y,z,u,v) floats."""
     if mp + 32 > end: return []
     msig = struct.unpack_from("<I", chunk, mp)[0]
     if msig != 0x0062646D: return []
@@ -56,10 +56,14 @@ def parse_mdb_verts(chunk, mp, end):
             vp = dp + pos_o + vi * stride
             if flag == 0:
                 x, y, z = struct.unpack_from("<3h", chunk, vp)
-                verts.append((float(x)/16.0, float(y)/16.0, float(z)/16.0))
+                x, y, z = float(x)/16.0, float(y)/16.0, float(z)/16.0
             else:
                 x, y, z = struct.unpack_from("<3f", chunk, vp)
-                verts.append((x, y, z))
+            u, v = 0.0, 0.0
+            if uv_o and dp + uv_o + vi * 4 + 4 <= end:
+                u16, v16 = struct.unpack_from("<2H", chunk, dp + uv_o + vi * 4)
+                u, v = u16 / 4096.0, v16 / 4096.0  # GS UV 12-bit fixed point
+            verts.append((x, y, z, u, v))
     return verts
 
 def parse_scr_mdb_verts(chunk, start, end):
@@ -103,11 +107,11 @@ def main():
     xs = [v[0] for v in all_verts]; ys = [v[1] for v in all_verts]; zs = [v[2] for v in all_verts]
     cx = (max(xs)+min(xs))/2; cy = (max(ys)+min(ys))/2; cz = (max(zs)+min(zs))/2
     scale = 1.0 / max(max(xs)-min(xs), max(ys)-min(ys), max(zs)-min(zs)) * 1.8
-    norm = [((x-cx)*scale, (y-cy)*scale, (z-cz)*scale) for x,y,z in all_verts]
+    norm = [((x-cx)*scale, (y-cy)*scale, (z-cz)*scale, u, v) for x,y,z,u,v in all_verts]
     with open(OUT_PATH, "wb") as f:
         f.write(struct.pack("<I", len(norm)))
-        for x,y,z in norm:
-            f.write(struct.pack("<3f", x, y, z))
+        for x,y,z,u,v in norm:
+            f.write(struct.pack("<5f", x, y, z, u, v))
     print(f"wrote {OUT_PATH}: {len(norm)} verts normalized")
 
 if __name__ == "__main__":

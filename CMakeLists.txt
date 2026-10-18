@@ -29,6 +29,18 @@ add_executable(pl00_render
 target_include_directories(pl00_render PRIVATE src/gif src/gs src/vk)
 target_link_libraries(pl00_render PRIVATE Vulkan::Vulkan)
 
+# game_loop_test: CPU interpreter -> DMA ch2 -> GIF -> GS -> Vulkan (integrasi penuh)
+add_executable(game_loop_test
+  src/shim/game_loop_test.cpp
+  src/shim/ee_cpu.cpp
+  src/shim/ee_bus.cpp
+  src/shim/ee_kernel.cpp
+  src/gif/gif.cpp
+  src/gs/gs_state.cpp
+  src/vk/vk_backend.cpp)
+target_include_directories(game_loop_test PRIVATE src/shim src/gif src/gs src/vk)
+target_link_libraries(game_loop_test PRIVATE Vulkan::Vulkan)
+
 # 3) M5 shim kernel EE (thread/sema/eventflag/file/gif-hook) — portable std::thread
 add_executable(shim_test
   src/shim/shim_test.cpp
