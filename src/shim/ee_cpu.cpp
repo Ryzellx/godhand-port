@@ -133,6 +133,14 @@ bool run(Cpu& c, SyscallFn handler, u64 max_inst) {
         case 0x03: wreg(c, 31, c.pc + 8); c.next_pc = ((c.pc + 4) & 0xF0000000) | tgt(inst); break;
         // ---------- BRANCH ----------
         case 0x04: if (c.r[rs(inst)] == c.r[rt(inst)]) c.next_pc = c.pc + 4 + (sx16(imm(inst)) << 2); break; // beq
+        case 0x14: if (c.r[rs(inst)] == c.r[rt(inst)]) c.next_pc = c.pc + 4 + (sx16(imm(inst)) << 2);
+                   else c.next_pc = c.pc + 8; break;                                    // beql (likely, skip delay if not taken)
+        case 0x15: if (c.r[rs(inst)] != c.r[rt(inst)]) c.next_pc = c.pc + 4 + (sx16(imm(inst)) << 2);
+                   else c.next_pc = c.pc + 8; break;                                    // bnel
+        case 0x16: if ((int32_t)c.r[rs(inst)] <= 0) c.next_pc = c.pc + 4 + (sx16(imm(inst)) << 2);
+                   else c.next_pc = c.pc + 8; break;                                    // blezl
+        case 0x17: if ((int32_t)c.r[rs(inst)] > 0) c.next_pc = c.pc + 4 + (sx16(imm(inst)) << 2);
+                   else c.next_pc = c.pc + 8; break;                                    // bgtzl
         case 0x05: if (c.r[rs(inst)] != c.r[rt(inst)]) c.next_pc = c.pc + 4 + (sx16(imm(inst)) << 2); break; // bne
         case 0x06: if ((int32_t)c.r[rs(inst)] <= 0) c.next_pc = c.pc + 4 + (sx16(imm(inst)) << 2); break;    // blez
         case 0x07: if ((int32_t)c.r[rs(inst)] > 0) c.next_pc = c.pc + 4 + (sx16(imm(inst)) << 2); break;     // bgtz
@@ -154,25 +162,39 @@ bool run(Cpu& c, SyscallFn handler, u64 max_inst) {
         case 0x28: eebus::write8(c.r[rs(inst)] + sx16(imm(inst)), (u8)(c.r[rt(inst)] & 0xFF)); break;            // sb
         case 0x29: eebus::write16(c.r[rs(inst)] + sx16(imm(inst)), (u16)(c.r[rt(inst)] & 0xFFFF)); break;        // sh
         case 0x2B: eebus::write32(c.r[rs(inst)] + sx16(imm(inst)), c.r[rt(inst)]); break;                        // sw
+        case 0x3F: {  // SD: store doubleword (64 bit) — EE kritis
+            u32 a = c.r[rs(inst)] + sx16(imm(inst));
+            u32 low = c.r[rt(inst)];
+            eebus::write32(a, low);
+            eebus::write32(a + 4, 0);   // upper 32-bit dari GPR (EE 128-bit reg, MVP 0)
+            break;
+        }
+        case 0x37: {  // LD: load doubleword — MVP: baca low 32 bit, upper = 0 (sign-extend nanti)
+            u32 a = c.r[rs(inst)] + sx16(imm(inst));
+            c.r[rt(inst)] = eebus::read32(a);
+            break;
+        }
+        case 0x3E: {  // SDL (store doubleword left) — simplify: treat as sw
+            u32 a = c.r[rs(inst)] + sx16(imm(inst));
+            eebus::write32(a, c.r[rt(inst)]);
+            break;
+        }
+        case 0x3A: {  // LWL — simplify: same as lw
+            c.r[rt(inst)] = eebus::read32(c.r[rs(inst)] + sx16(imm(inst)));
+            break;
+        }
+        case 0x3B: {  // LWR
+            c.r[rt(inst)] = eebus::read32(c.r[rs(inst)] + sx16(imm(inst)));
+            break;
+        }
+        case 0x2E: {  // SWL — treat as sw
+            u32 a = c.r[rs(inst)] + sx16(imm(inst));
+            eebus::write32(a, c.r[rt(inst)]);
+            break;
+        }
         // ---------- LWC1/SWC1 (FPR, stub data-path; crt0 tak pakai) ----------
         case 0x31: { u32 a = c.r[rs(inst)] + sx16(imm(inst)); c.f[rt(inst)] = eebus::read32(a); break; }  // lwc1
         case 0x39: eebus::write32(c.r[rs(inst)] + sx16(imm(inst)), c.f[rt(inst)]); break;                  // swc1
-        // ---------- SQ (0x2E? no: 0x2F? ...) — EE SQ = opcode 0x2F? Cek tak ada; LQ 0x2E ----------
-        case 0x2E: {  // LQ: 16-byte load (128-bit) — kita hanya simpan low 32 bit per reg rt
-            u32 a = c.r[rs(inst)] + sx16(imm(inst));
-            c.f[rt(inst)] = eebus::read32(a);
-            break;
-        }
-        case 0x2F: {  // SQ: 16-byte store — store low 32 bit (crt0: sq zero -> nol memory)
-            u32 a = c.r[rs(inst)] + sx16(imm(inst));
-            u32 z = c.r[rt(inst)];
-            eebus::write32(a, z);
-            // tulisan 16B (4 word): untuk nol-init, tulis 4 word demi presisi store loop crt0
-            eebus::write32(a + 4, z);
-            eebus::write32(a + 8, z);
-            eebus::write32(a + 12, z);
-            break;
-        }
         // ---------- COP0/COP1 ----------
         case 0x10: {  // COP0: crt0 tak pakai MMU intr — stub safe (mfc0 = 0)
             if (rs(inst) == 0x00) { wreg(c, rt(inst), 0); break; }  // mfc0
