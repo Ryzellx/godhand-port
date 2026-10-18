@@ -11,7 +11,7 @@
 
 namespace eebus {
 
-using u8 = uint8_t; using u32 = uint32_t; using u64 = uint64_t;
+using u8 = uint8_t; using u16 = uint16_t; using u32 = uint32_t; using u64 = uint64_t;
 
 // EE RAM utama 32 MB (konsol asli); alamat di-mask ke window ini.
 inline constexpr u32 RAM_SIZE = 32u * 1024u * 1024u;
@@ -33,6 +33,10 @@ bool  mem_read(u32 addr, void* out, size_t n);   // false kalau lintas batas win
 // Dispatch tulis/baca MMIO — dipanggil lapis CPU nanti saat eksekusi sw/stw
 void  mmio_write32(u32 addr, u32 val);
 u32   mmio_read32(u32 addr);
+
+// Akses memori terpadu utk CPU (auto dispatch: RAM window / MMIO window)
+u8   read8(u32 addr);  u16 read16(u32 addr);  u32 read32(u32 addr);
+void write8(u32 addr, u8 v); void write16(u32 addr, u16 v); void write32(u32 addr, u32 v);
 
 // Statistik (bukti test)
 struct Stats {

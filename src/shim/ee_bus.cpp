@@ -99,4 +99,41 @@ u32 mmio_read32(u32 addr) {
 
 const Stats& stats() { return g_stats; }
 
+// ---- akses terpadu utk CPU (RAM window / MMIO window) ----
+static inline bool is_mmio(u32 a) { return (a >> 20) == 0x100; }  // 0x10000000..0x100FFFFF
+
+u8 read8(u32 addr) {
+    if (is_mmio(addr)) { u32 b = mmio_read32(addr & ~3u); return (b >> ((addr & 3) * 8)) & 0xFF; }
+    u32 off = addr & RAM_MASK;
+    return off < RAM_SIZE ? ram()[off] : 0;
+}
+u16 read16(u32 addr) {
+    if (is_mmio(addr)) { u32 w = mmio_read32(addr & ~3u); return (w >> ((addr & 2) * 8)) & 0xFFFF; }
+    u32 off = addr & RAM_MASK;
+    if (off + 2 > RAM_SIZE) return 0;
+    return (u16)(ram()[off] | (ram()[off+1] << 8));
+}
+u32 read32(u32 addr) {
+    if (is_mmio(addr)) return mmio_read32(addr);
+    u32 off = addr & RAM_MASK;
+    if (off + 4 > RAM_SIZE) return 0;
+    u32 v; std::memcpy(&v, ram().data() + off, 4);
+    return v;
+}
+void write8(u32 addr, u8 v) {
+    if (is_mmio(addr)) return;
+    u32 off = addr & RAM_MASK;
+    if (off < RAM_SIZE) ram()[off] = v;
+}
+void write16(u32 addr, u16 v) {
+    if (is_mmio(addr)) return;
+    u32 off = addr & RAM_MASK;
+    if (off + 2 <= RAM_SIZE) { ram()[off] = v & 0xFF; ram()[off+1] = (v >> 8) & 0xFF; }
+}
+void write32(u32 addr, u32 v) {
+    if (is_mmio(addr)) { mmio_write32(addr, v); return; }
+    u32 off = addr & RAM_MASK;
+    if (off + 4 <= RAM_SIZE) std::memcpy(ram().data() + off, &v, 4);
+}
+
 } // namespace eebus

@@ -37,3 +37,13 @@ add_executable(bus_test
   src/gs/gs_state.cpp)
 target_include_directories(bus_test PRIVATE src/shim src/gif src/gs)
 target_link_libraries(bus_test PRIVATE Threads::Threads)
+
+# 4) M7b crt0 test — CPU interpreter menjalankan crt0 ASLI dari ELF game
+add_executable(crt0_test
+  src/shim/crt0_test.cpp
+  src/shim/ee_cpu.cpp
+  src/shim/ee_bus.cpp
+  src/shim/ee_kernel.cpp)
+target_include_directories(crt0_test PRIVATE src/shim)
+find_package(Threads REQUIRED)
+target_link_libraries(crt0_test PRIVATE Threads::Threads)
