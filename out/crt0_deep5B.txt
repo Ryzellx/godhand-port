@@ -1,0 +1,21 @@
+crt0 run: instret=5000000000 stop=clean-cap pc=0x003b697c
+syscalls seen: 2 -> 60 61
+syscall census: 60:1 61:1 64:2 90:2 91:1 100:1 115:83333 116:3 | distinct=8 total=83344
+hot-pc top12 (samples=76293/5000000000 instr):
+  0x003b696c text    n=10899      14.29%
+  0x003b6970 text    n=10899      14.29%
+  0x003b6978 text    n=10899      14.29%
+  0x003b697c text    n=10899      14.29%
+  0x003b6980 text    n=10899      14.29%
+  0x003b6984 text    n=10899      14.29%
+  0x003b6988 text    n=10899      14.29%
+backward-branch census top8 (total=714285706):
+  0x003b6984 n=714285696
+  0x003b643c n=1
+  0x003b644c n=1
+  0x003b6618 n=1
+  0x003b68f8 n=1
+  0x003b6910 n=1
+  0x003b6928 n=1
+  0x003b6938 n=1
+PASS: crt0 asli dieksekusi CPU — SetupThread->SetupHeap via shim
