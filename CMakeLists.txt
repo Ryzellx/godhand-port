@@ -77,3 +77,10 @@ add_executable(branch_test
   src/shim/ee_kernel.cpp)
 target_include_directories(branch_test PRIVATE src/shim)
 target_link_libraries(branch_test PRIVATE Threads::Threads)
+
+# direct_render: render model Gene langsung ke Vulkan (bypass GIF)
+add_executable(direct_render
+  src/slice/direct_render.cpp
+  src/vk/vk_backend.cpp)
+target_include_directories(direct_render PRIVATE src/vk)
+target_link_libraries(direct_render PRIVATE Vulkan::Vulkan)

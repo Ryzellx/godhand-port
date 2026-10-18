@@ -41,8 +41,8 @@ int main() {
     uint32_t vcount = 0;
     vf.read(reinterpret_cast<char*>(&vcount), 4);
     if (vcount == 0 || vcount > 1000000) { std::printf("FAIL: vcount=%u\n", vcount); return 1; }
-    std::vector<float> verts(vcount * 3);
-    vf.read(reinterpret_cast<char*>(verts.data()), vcount * 3 * 4);
+    std::vector<float> verts(vcount * 5);  // x,y,z,u,v
+    vf.read(reinterpret_cast<char*>(verts.data()), vcount * 5 * 4);
     std::printf("[pl00] %u vertices loaded from disc\n", vcount);
 
     // ---- 3D->2D projection (perspective) ----
@@ -73,7 +73,7 @@ int main() {
 
     // build triangles dari consecutive vertex groups (strip-based: v[i], v[i+1], v[i+2])
     uint32_t tri_count = vcount / 3;
-    if (tri_count > 20000) tri_count = 20000; // cap biar gak overflow
+    if (tri_count > 100) tri_count = 100;  // DEBUG LIMIT // cap biar gak overflow
     std::printf("[pl00] building %u triangles\n", tri_count);
 
     // batch per 100 triangles
@@ -89,7 +89,7 @@ int main() {
             uint8_t g = (uint8_t)(100 + (int)(verts[base*3+1] * 60) % 128);
             uint8_t b = (uint8_t)(180 + (int)(verts[base*3] * 50) % 75);
             for (uint32_t vi = 0; vi < 3; vi++) {
-                uint32_t idx = (base + vi) * 3;
+                uint32_t idx = (base + vi) * 5;
                 int sx, sy;
                 project(verts[idx], verts[idx+1], verts[idx+2], sx, sy);
                 if (sx < 0) sx = 0; if (sx >= (int)W) sx = W-1;

@@ -332,8 +332,20 @@ bool run(Cpu& c, SyscallFn handler, u64 max_inst) {
             handler(115, 0, 0, 0, 0, v0);
             w32(c, 2, v0);
         }
-        if (c.pc >= 0x02000000) { fault("pc_oor"); return true; }
-        if (c.next_pc >= 0x02000000) { fault("npc_oor"); return true; }
+        { // PC ring buffer crash trace
+            static uint32_t pc_ring[16] = {};
+            static uint32_t pc_ri = 0;
+            pc_ring[pc_ri++ & 15] = c.pc;
+            if (c.pc >= 0x02000000 || c.next_pc >= 0x02000000) {
+                std::fprintf(stderr, "[CRASH] pc=0x%08x next=0x%08x instret=%llu\n",
+                    c.pc, c.next_pc, (unsigned long long)c.instret);
+                std::fprintf(stderr, "[CRASH] ra=0x%08x sp=0x%08x gp=0x%08x\n",
+                    c.r[31][0], c.r[29][0], c.r[28][0]);
+                for (int i = 1; i <= 16; i++)
+                    std::fprintf(stderr, "  pc[%2d]=0x%08x\n", i, pc_ring[(pc_ri + i - 1) & 15]);
+                fault("pc_oor"); return true;
+            }
+        }
     }
     return true;   // instret cap — normal utk run berbatas
 }

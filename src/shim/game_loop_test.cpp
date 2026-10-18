@@ -101,6 +101,11 @@ int main() {
     // run CPU — long enough to reach render code
     std::printf("[game] running CPU interpreter...\n");
     bool stopped = eecpu::run(cpu, sys_handler, 2'000'000'000);
+    std::printf("[game] last 10 PC trace (dari hot-PC sampler):\n");
+    // cek fault_pc untuk tahu instruksi terakhir sebelum crash
+    if (stopped && cpu.fault_pc) {
+        std::printf("[game] fault_pc=0x%08x fault=%s\n", cpu.fault_pc, cpu.fault ? cpu.fault : "?");
+    }
 
     std::printf("[game] CPU stopped: %s (instret=%llu, pc=0x%08x)\n",
                 stopped ? cpu.fault : "clean-cap",
