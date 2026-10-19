@@ -107,3 +107,10 @@ add_executable(textured_render
   src/vk/vk_backend.cpp)
 target_include_directories(textured_render PRIVATE src/vk)
 target_link_libraries(textured_render PRIVATE Vulkan::Vulkan)
+
+# game_demo: playable demo dengan interactive controls
+add_executable(game_demo
+  src/slice/game_demo.cpp
+  src/vk/vk_backend.cpp)
+target_include_directories(game_demo PRIVATE src/vk)
+target_link_libraries(game_demo PRIVATE Vulkan::Vulkan)

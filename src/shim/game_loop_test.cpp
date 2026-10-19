@@ -98,6 +98,15 @@ int main() {
     eekern::set_gif_kick(on_gif_kick);
     std::printf("[game] GIF kick callback registered\n");
 
+    // init vtable di 0x3c4080 (function pointer table yang game expects)
+    for (uint32_t i = 0; i < 256; i++) {
+        eebus::write32(0x3c4080 + i * 4, 0x100248);  // point ke return stub
+    }
+    // init heap area (game expects initialized heap)
+    for (uint32_t i = 0; i < 1024; i++) {
+        eebus::write32(0x460000 + i * 4, 0);
+    }
+
     // run CPU — long enough to reach render code
     std::printf("[game] running CPU interpreter...\n");
     bool stopped = eecpu::run(cpu, sys_handler, 2'000'000'000);

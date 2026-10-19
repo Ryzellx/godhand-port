@@ -1,0 +1,122 @@
+[demo] === GOD HAND PLAYABLE DEMO ===
+[demo] Controls: A/D=rotasi Y, W/S=rotasi X, Q/E=zoom, SPACE=auto-rotate, X=quit
+
+[demo] 8349 vertices loaded
+[vkphase] instance
+[vkphase] enumerate
+[vkphase] device
+[vkphase] image+mem+view
+[vkphase] renderpass
+[vkphase] framebuffer
+[vkphase] cmdpool+fence
+[vkphase] shaders+layout
+[vkphase] pipeline
+[demo] starting interactive loop...
+[demo] frame 1 (rot_y=0.02) -> out/demo_frame_0000.ppm
+[demo] frame 31 (rot_y=0.62) -> out/demo_frame_0001.ppm
+[demo] frame 61 (rot_y=1.22) -> out/demo_frame_0002.ppm
+[demo] frame 91 (rot_y=1.82) -> out/demo_frame_0003.ppm
+[demo] frame 121 (rot_y=2.42) -> out/demo_frame_0004.ppm
+[demo] frame 151 (rot_y=3.02) -> out/demo_frame_0005.ppm
+[demo] frame 181 (rot_y=3.62) -> out/demo_frame_0006.ppm
+[demo] frame 211 (rot_y=4.22) -> out/demo_frame_0007.ppm
+[demo] frame 241 (rot_y=4.82) -> out/demo_frame_0008.ppm
+[demo] frame 271 (rot_y=5.42) -> out/demo_frame_0009.ppm
+[demo] frame 301 (rot_y=6.02) -> out/demo_frame_0010.ppm
+[demo] frame 331 (rot_y=6.62) -> out/demo_frame_0011.ppm
+[demo] frame 361 (rot_y=7.22) -> out/demo_frame_0012.ppm
+[demo] frame 391 (rot_y=7.82) -> out/demo_frame_0013.ppm
+[demo] frame 421 (rot_y=8.42) -> out/demo_frame_0014.ppm
+[demo] frame 451 (rot_y=9.02) -> out/demo_frame_0015.ppm
+[demo] frame 481 (rot_y=9.62) -> out/demo_frame_0016.ppm
+[demo] frame 511 (rot_y=10.22) -> out/demo_frame_0017.ppm
+[demo] frame 541 (rot_y=10.82) -> out/demo_frame_0018.ppm
+[demo] frame 571 (rot_y=11.42) -> out/demo_frame_0019.ppm
+[demo] frame 601 (rot_y=12.02) -> out/demo_frame_0020.ppm
+[demo] frame 631 (rot_y=12.62) -> out/demo_frame_0021.ppm
+[demo] frame 661 (rot_y=13.22) -> out/demo_frame_0022.ppm
+[demo] frame 691 (rot_y=13.82) -> out/demo_frame_0023.ppm
+[demo] frame 721 (rot_y=14.42) -> out/demo_frame_0024.ppm
+[demo] frame 751 (rot_y=15.02) -> out/demo_frame_0025.ppm
+[demo] frame 781 (rot_y=15.62) -> out/demo_frame_0026.ppm
+[demo] frame 811 (rot_y=16.22) -> out/demo_frame_0027.ppm
+[demo] frame 841 (rot_y=16.82) -> out/demo_frame_0028.ppm
+[demo] frame 871 (rot_y=17.42) -> out/demo_frame_0029.ppm
+[demo] frame 901 (rot_y=18.02) -> out/demo_frame_0030.ppm
+[demo] frame 931 (rot_y=18.62) -> out/demo_frame_0031.ppm
+[demo] frame 961 (rot_y=19.22) -> out/demo_frame_0032.ppm
+[demo] frame 991 (rot_y=19.82) -> out/demo_frame_0033.ppm
+[demo] frame 1021 (rot_y=20.42) -> out/demo_frame_0034.ppm
+[demo] frame 1051 (rot_y=21.02) -> out/demo_frame_0035.ppm
+[demo] frame 1081 (rot_y=21.62) -> out/demo_frame_0036.ppm
+[demo] frame 1111 (rot_y=22.22) -> out/demo_frame_0037.ppm
+[demo] frame 1141 (rot_y=22.82) -> out/demo_frame_0038.ppm
+[demo] frame 1171 (rot_y=23.42) -> out/demo_frame_0039.ppm
+[demo] frame 1201 (rot_y=24.02) -> out/demo_frame_0040.ppm
+[demo] frame 1231 (rot_y=24.62) -> out/demo_frame_0041.ppm
+[demo] frame 1261 (rot_y=25.22) -> out/demo_frame_0042.ppm
+[demo] frame 1291 (rot_y=25.82) -> out/demo_frame_0043.ppm
+[demo] frame 1321 (rot_y=26.42) -> out/demo_frame_0044.ppm
+[demo] frame 1351 (rot_y=27.02) -> out/demo_frame_0045.ppm
+[demo] frame 1381 (rot_y=27.62) -> out/demo_frame_0046.ppm
+[demo] frame 1411 (rot_y=28.22) -> out/demo_frame_0047.ppm
+[demo] frame 1441 (rot_y=28.82) -> out/demo_frame_0048.ppm
+[demo] frame 1471 (rot_y=29.42) -> out/demo_frame_0049.ppm
+[demo] frame 1501 (rot_y=30.02) -> out/demo_frame_0050.ppm
+[demo] frame 1531 (rot_y=30.62) -> out/demo_frame_0051.ppm
+[demo] frame 1561 (rot_y=31.22) -> out/demo_frame_0052.ppm
+[demo] frame 1591 (rot_y=31.82) -> out/demo_frame_0053.ppm
+[demo] frame 1621 (rot_y=32.42) -> out/demo_frame_0054.ppm
+[demo] frame 1651 (rot_y=33.02) -> out/demo_frame_0055.ppm
+[demo] frame 1681 (rot_y=33.62) -> out/demo_frame_0056.ppm
+[demo] frame 1711 (rot_y=34.22) -> out/demo_frame_0057.ppm
+[demo] frame 1741 (rot_y=34.82) -> out/demo_frame_0058.ppm
+[demo] frame 1771 (rot_y=35.42) -> out/demo_frame_0059.ppm
+[demo] frame 1801 (rot_y=36.02) -> out/demo_frame_0060.ppm
+[demo] frame 1831 (rot_y=36.62) -> out/demo_frame_0061.ppm
+[demo] frame 1861 (rot_y=37.22) -> out/demo_frame_0062.ppm
+[demo] frame 1891 (rot_y=37.82) -> out/demo_frame_0063.ppm
+[demo] frame 1921 (rot_y=38.42) -> out/demo_frame_0064.ppm
+[demo] frame 1951 (rot_y=39.02) -> out/demo_frame_0065.ppm
+[demo] frame 1981 (rot_y=39.62) -> out/demo_frame_0066.ppm
+[demo] frame 2011 (rot_y=40.22) -> out/demo_frame_0067.ppm
+[demo] frame 2041 (rot_y=40.82) -> out/demo_frame_0068.ppm
+[demo] frame 2071 (rot_y=41.42) -> out/demo_frame_0069.ppm
+[demo] frame 2101 (rot_y=42.02) -> out/demo_frame_0070.ppm
+[demo] frame 2131 (rot_y=42.62) -> out/demo_frame_0071.ppm
+[demo] frame 2161 (rot_y=43.22) -> out/demo_frame_0072.ppm
+[demo] frame 2191 (rot_y=43.82) -> out/demo_frame_0073.ppm
+[demo] frame 2221 (rot_y=44.42) -> out/demo_frame_0074.ppm
+[demo] frame 2251 (rot_y=45.02) -> out/demo_frame_0075.ppm
+[demo] frame 2281 (rot_y=45.62) -> out/demo_frame_0076.ppm
+[demo] frame 2311 (rot_y=46.22) -> out/demo_frame_0077.ppm
+[demo] frame 2341 (rot_y=46.82) -> out/demo_frame_0078.ppm
+[demo] frame 2371 (rot_y=47.42) -> out/demo_frame_0079.ppm
+[demo] frame 2401 (rot_y=48.02) -> out/demo_frame_0080.ppm
+[demo] frame 2431 (rot_y=48.62) -> out/demo_frame_0081.ppm
+[demo] frame 2461 (rot_y=49.22) -> out/demo_frame_0082.ppm
+[demo] frame 2491 (rot_y=49.82) -> out/demo_frame_0083.ppm
+[demo] frame 2521 (rot_y=50.42) -> out/demo_frame_0084.ppm
+[demo] frame 2551 (rot_y=51.02) -> out/demo_frame_0085.ppm
+[demo] frame 2581 (rot_y=51.62) -> out/demo_frame_0086.ppm
+[demo] frame 2611 (rot_y=52.22) -> out/demo_frame_0087.ppm
+[demo] frame 2641 (rot_y=52.82) -> out/demo_frame_0088.ppm
+[demo] frame 2671 (rot_y=53.42) -> out/demo_frame_0089.ppm
+[demo] frame 2701 (rot_y=54.02) -> out/demo_frame_0090.ppm
+[demo] frame 2731 (rot_y=54.62) -> out/demo_frame_0091.ppm
+[demo] frame 2761 (rot_y=55.22) -> out/demo_frame_0092.ppm
+[demo] frame 2791 (rot_y=55.82) -> out/demo_frame_0093.ppm
+[demo] frame 2821 (rot_y=56.42) -> out/demo_frame_0094.ppm
+[demo] frame 2851 (rot_y=57.02) -> out/demo_frame_0095.ppm
+[demo] frame 2881 (rot_y=57.62) -> out/demo_frame_0096.ppm
+[demo] frame 2911 (rot_y=58.22) -> out/demo_frame_0097.ppm
+[demo] frame 2941 (rot_y=58.82) -> out/demo_frame_0098.ppm
+[demo] frame 2971 (rot_y=59.42) -> out/demo_frame_0099.ppm
+[demo] frame 3001 (rot_y=60.02) -> out/demo_frame_0100.ppm
+[demo] frame 3031 (rot_y=60.62) -> out/demo_frame_0101.ppm
+[demo] frame 3061 (rot_y=61.22) -> out/demo_frame_0102.ppm
+[demo] frame 3091 (rot_y=61.82) -> out/demo_frame_0103.ppm
+[demo] frame 3121 (rot_y=62.42) -> out/demo_frame_0104.ppm
+[demo] frame 3151 (rot_y=63.02) -> out/demo_frame_0105.ppm
+[demo] frame 3181 (rot_y=63.62) -> out/demo_frame_0106.ppm
+[demo] frame 3211 (rot_y=64.22) -> out/demo_frame_0107.ppm
