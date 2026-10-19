@@ -100,3 +100,10 @@ add_executable(pl00_v2
   src/vk/vk_backend.cpp)
 target_include_directories(pl00_v2 PRIVATE src/gif src/gs src/vk)
 target_link_libraries(pl00_v2 PRIVATE Vulkan::Vulkan)
+
+# textured_render: model Gene dengan texture dari disc
+add_executable(textured_render
+  src/slice/textured_render.cpp
+  src/vk/vk_backend.cpp)
+target_include_directories(textured_render PRIVATE src/vk)
+target_link_libraries(textured_render PRIVATE Vulkan::Vulkan)
