@@ -141,7 +141,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 }
 
 int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
-    std::ifstream vf("battle_scene.bin", std::ios::binary);
+    std::ifstream vf("game_scene.bin", std::ios::binary);
     if (!vf) {
         MessageBox(NULL, "pl00_verts.bin not found!\nPut it next to the exe.", "God Hand", MB_OK);
         return 1;

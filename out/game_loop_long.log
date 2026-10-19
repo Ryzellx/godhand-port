@@ -1,0 +1,36 @@
+[game] === GAME LOOP INTEGRASI: CPU -> DMA -> GIF -> Vulkan ===
+[game] GIF kick callback registered
+[game] running CPU interpreter...
+[DEBUG] 0x3b1ce4: t0=0x00000000 sp=0x02000000 fp=0x00000000
+[CODE_END] pc=0x003bbf1c next=0x003bbf20 instret=716741 ra=0x00000000 sp=0x02000000
+  pc[ 1]=0x003bbee0
+  pc[ 2]=0x003bbee4
+  pc[ 3]=0x003bbee8
+  pc[ 4]=0x003bbeec
+  pc[ 5]=0x003bbef0
+  pc[ 6]=0x003bbef4
+  pc[ 7]=0x003bbef8
+  pc[ 8]=0x003bbefc
+  pc[ 9]=0x003bbf00
+  pc[10]=0x003bbf04
+  pc[11]=0x003bbf08
+  pc[12]=0x003bbf0c
+  pc[13]=0x003bbf10
+  pc[14]=0x003bbf14
+  pc[15]=0x003bbf18
+  pc[16]=0x003bbf1c
+  r28=0x0063fd48
+  r29=0x02000000
+[JR NULL] pc=0x003c408c target=0x00000000 -> skip
+[JR NULL] pc=0x003c4094 target=0x00000000 -> skip
+[JR NULL] pc=0x003c409c target=0x00000000 -> skip
+[JR NULL] pc=0x003c40a4 target=0x00000000 -> skip
+[JR NULL] pc=0x003c40ac target=0x00000000 -> skip
+[CODE_BOUNDS] pc=0x01fffffc next=0x02000000 instret=8118269 — STOP (past .text)
+[game] last 10 PC trace (dari hot-PC sampler):
+[game] fault_pc=0x01fffffc fault=code_end
+[game] CPU stopped: code_end (instret=8118269, pc=0x01fffffc)
+[game] DMA ch2 kicks: 0, vertices accumulated: 0
+NOTE: belum ada DMA ch2 kick dari game code (CPU belum sampai render path)
+PASS: pipeline connected, waiting for game to reach render code
+DONE RC=0
