@@ -1,0 +1,43 @@
+[game] === GAME LOOP INTEGRASI: CPU -> DMA -> GIF -> Vulkan ===
+[ELF] load: vaddr=0x00100000 filesz=3542244 memsz=6842292
+[ELF] loaded successfully
+[game] GIF kick callback registered
+[game] function table: 16 entries at 0x003d0000 -> 0x00100248
+[game] running CPU interpreter...
+[OP] pc=0x0010000c op=0x1c inst=0x70000c28 instret=0
+[OP] pc=0x00100010 op=0x1c inst=0x70001428 instret=1
+[OP] pc=0x00100014 op=0x1c inst=0x70001c28 instret=2
+[OP] pc=0x00100018 op=0x1c inst=0x70002428 instret=3
+[OP] pc=0x0010001c op=0x1c inst=0x70002c28 instret=4
+[OP] pc=0x00100020 op=0x1c inst=0x70003428 instret=5
+[OP] pc=0x00100024 op=0x1c inst=0x70003c28 instret=6
+[OP] pc=0x00100028 op=0x1c inst=0x70004428 instret=7
+[OP] pc=0x0010002c op=0x1c inst=0x70004c28 instret=8
+[OP] pc=0x00100030 op=0x1c inst=0x70005428 instret=9
+[OP] pc=0x00100034 op=0x1c inst=0x70005c28 instret=10
+[OP] pc=0x00100038 op=0x1c inst=0x70006428 instret=11
+[OP] pc=0x0010003c op=0x1c inst=0x70006c28 instret=12
+[OP] pc=0x00100040 op=0x1c inst=0x70007428 instret=13
+[OP] pc=0x00100044 op=0x1c inst=0x70007c28 instret=14
+[OP] pc=0x00100048 op=0x1c inst=0x70008428 instret=15
+[OP] pc=0x0010004c op=0x1c inst=0x70008c28 instret=16
+[OP] pc=0x00100050 op=0x1c inst=0x70009428 instret=17
+[OP] pc=0x00100054 op=0x1c inst=0x70009c28 instret=18
+[OP] pc=0x00100058 op=0x1c inst=0x7000a428 instret=19
+[BEQ taken #1] pc=0x00100134 -> 0x00100150 instret=75
+[J #1] pc=0x00100174 -> 0x00100158 instret=85
+[J #2] pc=0x00100174 -> 0x00100158 instret=93
+[J #3] pc=0x00100174 -> 0x00100158 instret=101
+[J #4] pc=0x00100174 -> 0x00100158 instret=109
+[J #5] pc=0x00100174 -> 0x00100158 instret=117
+[J #6] pc=0x00100174 -> 0x00100158 instret=125
+[J #7] pc=0x00100174 -> 0x00100158 instret=133
+[J #8] pc=0x00100174 -> 0x00100158 instret=141
+[J #9] pc=0x00100174 -> 0x00100158 instret=149
+[J #10] pc=0x00100174 -> 0x00100158 instret=157
+[J #11] pc=0x00100174 -> 0x00100158 instret=165
+[J #12] pc=0x00100174 -> 0x00100158 instret=173
+[J #13] pc=0x00100174 -> 0x00100158 instret=181
+[J #14] pc=0x00100174 -> 0x00100158 instret=189
+[J #15] pc=0x00100174 -> 0x00100158 instret=197
+[BEQ taken #2] pc=0x0010015c -> 0x0010017c instret=73271
