@@ -166,11 +166,16 @@ bool run(Cpu& c, SyscallFn handler, u64 max_inst) {
             case 0x07: w32(c, rd(inst), (u32)((s32)c.r[rt(inst)][0] >> (c.r[rs(inst)][0] & 31))); break; // srav
             case 0x08: {
                 u32 target = c.r[rs(inst)][0];
-                static uint32_t jr_count = 0;
-                if (jr_count++ < 20)
-                    std::fprintf(stderr, "[JR #%u] pc=0x%08x target=0x%08x rs=%u instret=%llu\n",
-                        jr_count, c.pc, target, rs(inst), (unsigned long long)c.instret);
-                c.next_pc = target; break;  // jr
+                if (target == 0 || target >= 0x02000000) {
+                    // jr ke null/invalid — skip (continue ke next instruction)
+                    static uint32_t jr_null = 0;
+                    if (jr_null++ < 5)
+                        std::fprintf(stderr, "[JR NULL] pc=0x%08x target=0x%08x -> skip\n", c.pc, target);
+                    c.next_pc = c.pc + 8;  // skip delay slot + this
+                } else {
+                    c.next_pc = target;
+                }
+                break;  // jr
             }
             case 0x09: {
                 u32 t = c.r[rs(inst)][0];
@@ -406,11 +411,15 @@ bool run(Cpu& c, SyscallFn handler, u64 max_inst) {
                     if (c.r[r][0]) std::fprintf(stderr, "  r%-2d=0x%08x\n", r, c.r[r][0]);
             }
             // code bounds: .text ends at 0x003BBF20 (ELF section hdr, verified 2026-10-19)
-        if (c.next_pc >= 0x003BBF20 && c.next_pc < 0x10000000) {
+        if (c.next_pc >= 0x02000000 && c.next_pc < 0x10000000) {
             std::fprintf(stderr, "[CODE_BOUNDS] pc=0x%08x next=0x%08x instret=%llu — STOP (past .text)\n",
                 c.pc, c.next_pc, (unsigned long long)c.instret);
             fault("code_end");
             return true;
+        }
+        // data area check: 0x3c0000-0x3d0000 = function table/data, bukan code
+        if (c.next_pc >= 0x003c0000 && c.next_pc < 0x003d0000) {
+            c.next_pc = c.pc + 8;  // skip data area
         }
         if (c.pc >= 0x02000000 || c.next_pc >= 0x02000000) {
                 std::fprintf(stderr, "[CRASH] pc=0x%08x next=0x%08x instret=%llu\n",

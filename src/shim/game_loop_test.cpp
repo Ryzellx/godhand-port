@@ -90,7 +90,7 @@ int main() {
     // setup CPU
     eebus::reset();
     eecpu::Cpu cpu;
-    cpu.reset(0x31db70);   // main wrapper game asli
+    cpu.reset(0x100008);   // CRT0 entry — full init sequence
     cpu.set_sp(0x02000000);
     cpu.set_gp(0x0063fd48);
 
@@ -109,7 +109,7 @@ int main() {
 
     // run CPU — long enough to reach render code
     std::printf("[game] running CPU interpreter...\n");
-    bool stopped = eecpu::run(cpu, sys_handler, 2'000'000'000);
+    bool stopped = eecpu::run(cpu, sys_handler, 50'000'000'000);
     std::printf("[game] last 10 PC trace (dari hot-PC sampler):\n");
     // cek fault_pc untuk tahu instruksi terakhir sebelum crash
     if (stopped && cpu.fault_pc) {
