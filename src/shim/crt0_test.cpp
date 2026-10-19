@@ -29,6 +29,12 @@ static s32 g_sema = -1;
 static bool sys_handler(u32 num, u32 a0, u32 a1, u32 a2, u32 a3, u32& v0) {
     if (num < 160) g_census[num]++; else g_census_oob++;
     switch (num) {
+    case 16: v0 = 1; return true;   // AddIntcHandler — native: no-op dispatch (dispatch IRQ nanti)
+    case 10: v0 = 1; return true; case 11: case 12: v0 = 0; return true;   // SbusIntc/Interrupt2Iop
+    case 13: case 14: case 15: v0 = 0; return true;                          // VTLB/VCommon/VInterrupt handler
+    case 17: case 19: v0 = 0; return true;                                  // Remove{Intc,Dmac}Handler
+    case 18: v0 = 1; return true;                                           // AddDmacHandler
+    case 20: case 21: case 22: case 23: v0 = 0; return true;                // _Enable/Disable{Intc,Dmac}
     case 64: {  // CreateSema — a0 = pointer param struct di bus mem
         u32 init = eebus::read32(a0 + 8), maxc = eebus::read32(a0 + 12);
         g_sp.init = (s32)init; g_sp.max = (s32)maxc;
@@ -147,8 +153,10 @@ int main(int argc, char** argv) {
     }
 
     Cpu cpu;
-    // PC start post-clear: 0x100198 (blok SetupThread/SetupHeap — gate crt0 asli).
-    cpu.reset(0x31db70);  // main wrapper game asli
+    // FULL crt0 dari entry ELF (0x100008): heap-clear -> SetupThread/SetupHeap (60->61)
+    // -> walk ROM-handler -> install exception -> main wrapper. PASS = 60,61 berurutan.
+    // (Sebelumnya start 0x31db70 = skip crt0; kriteria 60->61 tak pernah tercapai — fix sesi cron #8.)
+    cpu.reset(0x100008);  // ELF entry asli (verified: entry 0x100008, Phase 1a)
     cpu.set_sp(0x01FFFF00);                    // boot stack: top RAM valid (0x02000000 & MASK = 0!)
     cpu.set_gp(0x0063fd48);                    // gp dari crt0: lui a0,0x47; addiu a0,-29456
     cpu.hist = g_hist;

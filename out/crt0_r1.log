@@ -1,0 +1,87 @@
+[OP] pc=0x0010000c op=0x1c inst=0x70000c28 instret=0
+[OP] pc=0x00100010 op=0x1c inst=0x70001428 instret=1
+[OP] pc=0x00100014 op=0x1c inst=0x70001c28 instret=2
+[OP] pc=0x00100018 op=0x1c inst=0x70002428 instret=3
+[OP] pc=0x0010001c op=0x1c inst=0x70002c28 instret=4
+[OP] pc=0x00100020 op=0x1c inst=0x70003428 instret=5
+[OP] pc=0x00100024 op=0x1c inst=0x70003c28 instret=6
+[OP] pc=0x00100028 op=0x1c inst=0x70004428 instret=7
+[OP] pc=0x0010002c op=0x1c inst=0x70004c28 instret=8
+[OP] pc=0x00100030 op=0x1c inst=0x70005428 instret=9
+[OP] pc=0x00100034 op=0x1c inst=0x70005c28 instret=10
+[OP] pc=0x00100038 op=0x1c inst=0x70006428 instret=11
+[OP] pc=0x0010003c op=0x1c inst=0x70006c28 instret=12
+[OP] pc=0x00100040 op=0x1c inst=0x70007428 instret=13
+[OP] pc=0x00100044 op=0x1c inst=0x70007c28 instret=14
+[OP] pc=0x00100048 op=0x1c inst=0x70008428 instret=15
+[OP] pc=0x0010004c op=0x1c inst=0x70008c28 instret=16
+[OP] pc=0x00100050 op=0x1c inst=0x70009428 instret=17
+[OP] pc=0x00100054 op=0x1c inst=0x70009c28 instret=18
+[OP] pc=0x00100058 op=0x1c inst=0x7000a428 instret=19
+[BEQ taken #1] pc=0x00100134 -> 0x0010014c instret=75
+[J #1] pc=0x00100174 -> 0x00100158 instret=86
+[J #2] pc=0x00100174 -> 0x00100158 instret=94
+[J #3] pc=0x00100174 -> 0x00100158 instret=102
+[J #4] pc=0x00100174 -> 0x00100158 instret=110
+[J #5] pc=0x00100174 -> 0x00100158 instret=118
+[J #6] pc=0x00100174 -> 0x00100158 instret=126
+[J #7] pc=0x00100174 -> 0x00100158 instret=134
+[J #8] pc=0x00100174 -> 0x00100158 instret=142
+[J #9] pc=0x00100174 -> 0x00100158 instret=150
+[J #10] pc=0x00100174 -> 0x00100158 instret=158
+[J #11] pc=0x00100174 -> 0x00100158 instret=166
+[J #12] pc=0x00100174 -> 0x00100158 instret=174
+[J #13] pc=0x00100174 -> 0x00100158 instret=182
+[J #14] pc=0x00100174 -> 0x00100158 instret=190
+[J #15] pc=0x00100174 -> 0x00100158 instret=198
+[SQ-REENTER] pc=0x0010015c v0=0x006490f0 a0=0x007867b0 ra=0x00000000 sp=0x00000000 instret=1000008
+[SQ-REENTER] pc=0x0010015c v0=0x00649100 a0=0x007867b0 ra=0x00000000 sp=0x00000000 instret=1000016
+[SQ-REENTER] pc=0x0010015c v0=0x00649110 a0=0x007867b0 ra=0x00000000 sp=0x00000000 instret=1000024
+[BEQ taken #2] pc=0x0010015c -> 0x00100178 instret=1650088
+[CLEAR] pc=0x0010017c v0=0x007867b0 v1=0x007867b4 instret=1650090
+[CLEAR] pc=0x0010017c v0=0x007867b1 v1=0x007867b4 instret=1650098
+[CLEAR] pc=0x0010017c v0=0x007867b2 v1=0x007867b4 instret=1650106
+[BEQ taken #3] pc=0x0010017c -> 0x00100198 instret=1650122
+[JAL KEY] pc=0x001001e8 -> 0x003b6610 instret=1650144
+[JAL KEY] pc=0x003b6618 -> 0x003b6408 instret=1650148
+[JAL KEY] pc=0x003b643c -> 0x003afca0 instret=1650163
+[JAL KEY] pc=0x003b644c -> 0x003afca0 instret=1650171
+[JAL KEY] pc=0x003b6620 -> 0x003b6500 instret=1650182
+[JAL KEY] pc=0x003b6538 -> 0x003b6600 instret=1650198
+[JAL KEY] pc=0x003b6544 -> 0x003b6600 instret=1650205
+[JAL KEY] pc=0x003b6554 -> 0x003b64e8 instret=1650213
+[JAL KEY] pc=0x003b6568 -> 0x003b64e8 instret=1650222
+[BEQ taken #4] pc=0x003b6580 -> 0x003b65d0 instret=1650231
+[JAL KEY] pc=0x003b6628 -> 0x003b68b8 instret=1650244
+[JAL KEY] pc=0x003b68f8 -> 0x003b6850 instret=1650262
+[JAL KEY] pc=0x003b6910 -> 0x003b6860 instret=1650272
+[JAL KEY] pc=0x003b6928 -> 0x003b6860 instret=1650282
+[JAL KEY] pc=0x003b6930 -> 0x003aff20 instret=1650288
+[JAL KEY] pc=0x003b6938 -> 0x003aff20 instret=1650294
+[BEQ taken #5] pc=0x003a5344 -> 0x003a532c instret=1650457
+[BEQ taken #6] pc=0x003a5344 -> 0x003a532c instret=1650464
+[BEQ taken #7] pc=0x003a5344 -> 0x003a532c instret=1650471
+[BEQ taken #8] pc=0x003a5344 -> 0x003a532c instret=1650478
+[BEQ taken #9] pc=0x003a5344 -> 0x003a532c instret=1650485
+[BEQ taken #10] pc=0x003a5344 -> 0x003a532c instret=1650492
+[BGEZL] pc=0x003b6ae4 v=0x00000001 take=1 instret=1653631
+[ERET] pc=0x003b69f4 ra=0x003b6b38 errpc30=0x003b6b38 desave31=0x00000000 sr=0x00000004 instret=1653676
+[ERET] pc=0x003b69f4 ra=0x003b6b40 errpc30=0x003b6b40 desave31=0x00000000 sr=0x00000004 instret=1653698
+[ERET] pc=0x003b69f4 ra=0x003b6b48 errpc30=0x003b6b48 desave31=0x00000000 sr=0x00000004 instret=1653720
+timing: 0.02 s (81.7 M inst/s)
+crt0 run: instret=1653736 stop=syscall_unknown_20 pc=0x003af9e8
+syscalls seen: 2 -> 60 61
+syscall census: 16:1 20:1 60:1 61:1 64:2 90:2 91:6 100:2 115:27 116:10 131:2 | distinct=11 total=55
+hot-pc top12 (samples=25/1653736 instr):
+  0x00100158 text    n=25         100.00%
+backward-branch census top8 (total=206744):
+  0x00100170 n=206251
+  0x003a5340 n=255
+  0x003b6ab4 n=127
+  0x003b76ec n=63
+  0x003b6950 n=6
+  0x003b6960 n=6
+  0x003b696c n=5
+  0x00100190 n=4
+PASS: crt0 asli dieksekusi CPU — SetupThread->SetupHeap via shim
+NOTE: stop dgn fault=syscall_unknown_20 @pc=0x003af9e8 op=0000000c (crt0 2 syscall pertama OK)

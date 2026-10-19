@@ -294,36 +294,41 @@ bool run(Cpu& c, SyscallFn handler, u64 max_inst) {
             s32 v = (s32)c.r[rs(inst)][0];
             u32 rti = rt(inst);
             bool take;
+            bool likely = false;   // branch-LIKELY: tak diambil → delay slot DISIPAN
             switch (rti) {
             case 0x00: take = v < 0; break;   // bltz
             case 0x01: take = v >= 0; break;  // bgez
+            case 0x02: take = v < 0; likely = true; break;   // bltzl (static census .text: 127 situs)
+            case 0x03: {                     // bgezl (FAULT pertama 0x3b6ae4 sesi cron #8; 152 situs)
+                take = v >= 0; likely = true;
+                static uint32_t bgezl_c = 0;
+                if (bgezl_c++ < 3)
+                    std::fprintf(stderr, "[BGEZL] pc=0x%08x v=0x%08x take=%d instret=%llu\n",
+                        cur_pc, (u32)v, (int)take, (unsigned long long)c.instret);
+                break;
+            }
             case 0x10: take = v < 0; w32(c, 31, c.next_pc); break;   // bltzal
             case 0x11: take = v >= 0; w32(c, 31, c.next_pc); break;  // bgezal
-            case 0x12: take = v < 0; w32(c, 31, c.next_pc); break;   // bltzall
-            case 0x13: take = v >= 0; w32(c, 31, c.next_pc); break;  // bgezall
-            case 0x18: take = v < 0; break;   // BLTZL
-            case 0x19: take = v >= 0; break;  // BGEZL
+            case 0x12: take = v < 0; w32(c, 31, c.next_pc); likely = true; break;  // bltzall
+            case 0x13: take = v >= 0; w32(c, 31, c.next_pc); likely = true; break; // bgezall
+            case 0x18: take = v < 0; break;   // (label lama "BLTZL" salah posisi — posisi asli 0x02)
+            case 0x19: take = v >= 0; break;  // (label lama "BGEZL" — posisi asli 0x03)
             case 0x1A: take = v <= 0; break;  // tak ada di tabel EE — fallback defensif
             case 0x1B: take = v > 0; break;   // (jarang; kalau kena akan muncul di census)
             case 0x30: c.sa = (c.r[rs(inst)][0] & 0xF) << 1; take = false; break;  // MTSAB
             case 0x31: c.sa = (c.r[rs(inst)][0] & 0x7) << 2; take = false; break;  // MTSAH
-            
-        case 0x1C: {  // SPECIAL2 (MMI)
-            u32 f = fn(inst) & 0x3F;
-            switch (f) {
-            case 0x28: w32(c, rd(inst), c.r[rs(inst)][0] + c.r[rt(inst)][0]); break; // padduw
-            case 0x29: w32(c, rd(inst), c.r[rs(inst)][0] - c.r[rt(inst)][0]); break; // psubuw
-            case 0x00: w32(c, rd(inst), c.r[rs(inst)][0]); break;
-            case 0x01: w32(c, rd(inst), c.r[rs(inst)][0]); break;
-            case 0x20: w32(c, rd(inst), c.r[rs(inst)][0] + c.r[rt(inst)][0]); break;
-            case 0x21: w32(c, rd(inst), c.r[rs(inst)][0] - c.r[rt(inst)][0]); break;
-            default: w32(c, rd(inst), c.r[rs(inst)][0]); break;
+            case 0x1C: {  // rt=0x1C tak ada di tabel EE REGIMM — dulu paste MMI salah tempat
+                          // (bikin `take` uninitialized = UB). Deterministik: tak branch + census.
+                static uint32_t rimm1c = 0;
+                if (rimm1c++ < 5)
+                    std::fprintf(stderr, "[REGIMM 1C] pc=0x%08x inst=0x%08x instret=%llu\n",
+                        cur_pc, inst, (unsigned long long)c.instret);
+                take = false; break;
             }
-            break;
-        }
-        default: fault("REGIMM unknown"); return true;
-            }
+            default: fault("REGIMM unknown"); return true;
+                }
             if (take) c.next_pc = c.pc + (sx16(imm(inst)) << 2);
+            else if (likely) { c.pc += 4; c.next_pc = c.pc + 4; }  // likely not-taken → skip delay slot
             break;
         }
         // ---------- J / JAL ----------
@@ -346,10 +351,19 @@ bool run(Cpu& c, SyscallFn handler, u64 max_inst) {
         // ---------- BRANCH ----------
         case 0x04: {
             u32 target = c.pc + (sx16(imm(inst)) << 2);  // FIX: tanpa +4 (verified vs objdump)
-            // trace heap-clear loop — setiap instruction
-            if (c.pc >= 0x100158 && c.pc <= 0x100178 && c.instret < 20) {
-                std::fprintf(stderr, "[CLEAR] pc=0x%08x v0=0x%08x a0=0x%08x v1=0x%08x instret=%llu\n",
-                    c.pc, c.r[2][0], c.r[4][0], c.r[3][0], (unsigned long long)c.instret);
+            // trace heap-clear loop crt0 (v0 pointer, v1 end — disasm @0x100178): bounded
+            if (c.pc >= 0x100178 && c.pc <= 0x100194) {
+                static uint32_t clear_cnt = 0;
+                if (clear_cnt++ < 3)
+                    std::fprintf(stderr, "[CLEAR] pc=0x%08x v0=0x%08x v1=0x%08x instret=%llu\n",
+                        c.pc, c.r[2][0], c.r[3][0], (unsigned long long)c.instret);
+            }
+            // detektor RE-ENTRY sq-loop (0x100158) pasca-eret — seharusnya cuma 1x dari crt0
+            if (c.pc == 0x10015c && c.instret > 1'000'000ull) {
+                static uint32_t sqre = 0;
+                if (sqre++ < 3)
+                    std::fprintf(stderr, "[SQ-REENTER] pc=0x%08x v0=0x%08x a0=0x%08x ra=0x%08x sp=0x%08x instret=%llu\n",
+                        c.pc, c.r[2][0], c.r[4][0], c.r[31][0], c.r[29][0], (unsigned long long)c.instret);
             }
 
             if (c.r[rs(inst)][0] == c.r[rt(inst)][0]) {
@@ -362,13 +376,13 @@ bool run(Cpu& c, SyscallFn handler, u64 max_inst) {
             break; // beq: target = P+4+offset*4
         }
         case 0x14: if (c.r[rs(inst)][0] == c.r[rt(inst)][0]) c.next_pc = c.pc + (sx16(imm(inst)) << 2);
-                   else c.next_pc = c.pc + 4; break;                                    // beql
+                   else { c.pc += 4; c.next_pc = c.pc + 4; } break;                    // beql (likely: skip delay)
         case 0x15: if (c.r[rs(inst)][0] != c.r[rt(inst)][0]) c.next_pc = c.pc + (sx16(imm(inst)) << 2);
-                   else c.next_pc = c.pc + 4; break;                                    // bnel
+                   else { c.pc += 4; c.next_pc = c.pc + 4; } break;                    // bnel
         case 0x16: if ((s32)c.r[rs(inst)][0] <= 0) c.next_pc = c.pc + (sx16(imm(inst)) << 2);
-                   else c.next_pc = c.pc + 4; break;                                    // blezl
+                   else { c.pc += 4; c.next_pc = c.pc + 4; } break;                    // blezl
         case 0x17: if ((s32)c.r[rs(inst)][0] > 0) c.next_pc = c.pc + (sx16(imm(inst)) << 2);
-                   else c.next_pc = c.pc + 4; break;                                    // bgtzl
+                   else { c.pc += 4; c.next_pc = c.pc + 4; } break;                    // bgtzl
         case 0x05: if (c.r[rs(inst)][0] != c.r[rt(inst)][0]) c.next_pc = c.pc + (sx16(imm(inst)) << 2); break; // bne
         case 0x06: if ((s32)c.r[rs(inst)][0] <= 0) c.next_pc = c.pc + (sx16(imm(inst)) << 2); break;  // blez
         case 0x07: if ((s32)c.r[rs(inst)][0] > 0) c.next_pc = c.pc + (sx16(imm(inst)) << 2); break;   // bgtz
@@ -391,6 +405,8 @@ bool run(Cpu& c, SyscallFn handler, u64 max_inst) {
         case 0x21: { u32 a = c.r[rs(inst)][0] + sx16(imm(inst)); w32(c, rt(inst), (u16)eebus::read16(a)); break; }   // lh
         case 0x25: { u32 a = c.r[rs(inst)][0] + sx16(imm(inst)); w32(c, rt(inst), eebus::read16(a) & 0xFFFF); break; } // lhu
         case 0x23: { u32 a = c.r[rs(inst)][0] + sx16(imm(inst)); w32(c, rt(inst), eebus::read32(a)); break; }        // lw
+        case 0x27: { u32 a = c.r[rs(inst)][0] + sx16(imm(inst));                                // lwu (FAULT 0x3b713c; zero-extend 64)
+                     w64(c, rt(inst), (u64)eebus::read32(a)); break; }
         case 0x1E: {  // LQ (128-bit penuh): EE opcode 0x1E, alamat 16-aligned (di-mask)
             u32 a = (c.r[rs(inst)][0] + sx16(imm(inst))) & ~0xFu;
             u32* d = c.r[rt(inst)];
@@ -403,6 +419,20 @@ bool run(Cpu& c, SyscallFn handler, u64 max_inst) {
             u64 v = (u64)eebus::read32((u32)a) | ((u64)eebus::read32((u32)(a + 4)) << 32);
             w64(c, rt(inst), v); break;
         }
+        // ---------- FLOAT MEM + UNALIGNED 64 (census statik: swc1 23303 · lwc1 19602 situs) ----
+        case 0x31: { u32 a = c.r[rs(inst)][0] + sx16(imm(inst));                        // lwc1
+                     c.f[rt(inst)] = eebus::read32(a); break; }
+        case 0x39: { u32 a = c.r[rs(inst)][0] + sx16(imm(inst));                        // swc1
+                     eebus::write32(a, c.f[rt(inst)]); break; }
+        case 0x35: { u32 a = c.r[rs(inst)][0] + sx16(imm(inst)), r = rt(inst);          // ldc1 pair
+                     c.f[r] = eebus::read32(a); c.f[(r + 1) & 31] = eebus::read32(a + 4); break; }
+        case 0x3D: { u32 a = c.r[rs(inst)][0] + sx16(imm(inst)), r = rt(inst);          // sdc1 pair
+                     eebus::write32(a, c.f[r]); eebus::write32(a + 4, c.f[(r + 1) & 31]); break; }
+        case 0x2A: do_sdl(c.r[rs(inst)][0] + sx16(imm(inst)), g64(c, rt(inst))); break;  // sdl
+        case 0x2D: do_sdr(c.r[rs(inst)][0] + sx16(imm(inst)), g64(c, rt(inst))); break;  // sdr
+        case 0x2E: do_swr(c.r[rs(inst)][0] + sx16(imm(inst)), c.r[rt(inst)][0]); break;  // swr
+        case 0x2F: break;   // CACHE — native: tak ada cache koheren perlu disentuh
+        case 0x33: break;   // PREF — prefetch: no-op native
         // ---------- STORES ----------
         case 0x28: eebus::write8(c.r[rs(inst)][0] + sx16(imm(inst)), (u8)(c.r[rt(inst)][0] & 0xFF)); break;   // sb
         case 0x29: eebus::write16(c.r[rs(inst)][0] + sx16(imm(inst)), (u16)(c.r[rt(inst)][0] & 0xFFFF)); break; // sh
@@ -424,6 +454,24 @@ bool run(Cpu& c, SyscallFn handler, u64 max_inst) {
             u32 crs = rs(inst), crt = rt(inst), crd = rd(inst);
             if (crs == 0) w32(c, crt, c.cop0[crd]);            // MFC0
             else if (crs == 4) c.cop0[crd] = c.r[crt][0];      // MTC0
+            else if (crs == 0x10) {                            // CO ops (tlb/eret)
+                u32 f = fn(inst);
+                if (f == 0x18) {                               // ERET: pc = ErrorEPC (cop0 r31)
+                    static uint32_t eret_n = 0;
+                    if (eret_n++ < 5)
+                        std::fprintf(stderr, "[ERET] pc=0x%08x ra=0x%08x errpc30=0x%08x desave31=0x%08x sr=0x%08x instret=%llu\n",
+                            cur_pc, c.r[31][0], c.cop0[30], c.cop0[31], c.cop0[12],
+                            (unsigned long long)c.instret);
+                    c.pc = c.cop0[30] & ~3u; c.next_pc = c.pc + 4;  // ErrorEPC = cop0 r30 (R4000; r31=DESAVE)
+                    c.cop0[12] &= ~2u;                         // clear SR.EXL
+                } else {                                       // TLB ops: flat map = no-op
+                    static uint32_t tlbop = 0;
+                    if (tlbop++ < 5)
+                        std::fprintf(stderr, "[COP0 CO fn=0x%02x] pc=0x%08x instret=%llu\n",
+                            f, cur_pc, (unsigned long long)c.instret);
+                }
+                break;
+            }
             else { fault("COP0 rs unknown"); return true; }
             break;
         }
@@ -458,10 +506,15 @@ bool run(Cpu& c, SyscallFn handler, u64 max_inst) {
             c.btb[((c.pc - 4) >> 2) & 0x1FFFFFu]++;
         // VSYNC simulation: setiap 60k instruksi kirim SetVSyncFlag (syscall 115) —
         // simulasi 60Hz clock hardware PS2 yang membuat game lanjut ke frame berikutnya.
+        // FIX 2026-10-19 (bug "v0 cycling"): injeksi PERIODIK ini dulu juga nulis hasil ke
+        // r[2] (v0) — nolak GPR di tengah jalan. v0 = pointer heap-clear crt0 (@0x100180,
+        // nambah +1 per byte) di-reset ke 0 tiap 60000 inst → loop clear tak pernah sampai
+        // v1 → infinite loop (bukti: 55,8 M kali iterasi tanpa keluar). Sekarang: panggil
+        // handler untuk side-effect saja; return-value syscall cuma ditulis jalur SYSCALL
+        // instruksi (case 0x0C) yang memang menaruh hasil di v0 sesuai konvensi EE.
         if ((c.instret % 60000ull) == 0) {
             u32 v0 = 0;
             handler(115, 0, 0, 0, 0, v0);
-            w32(c, 2, v0);
         }
         { // PC ring buffer crash trace
             static uint32_t pc_ring[16] = {};

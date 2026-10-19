@@ -63,6 +63,12 @@ static bool sys_handler(uint32_t num, uint32_t a0, uint32_t a1, uint32_t a2, uin
     case 61: v0 = 0x2000000; return true;  // SetupHeap
     case 64: v0 = 1; return true;   // CreateSema
     case 65: case 66: case 68: case 69: v0 = 0; return true;
+    case 16: v0 = 1; return true;   // AddIntcHandler — native: no-op dispatch (dispatch IRQ nanti)
+    case 10: v0 = 1; return true; case 11: case 12: v0 = 0; return true;   // SbusIntc/Interrupt2Iop
+    case 13: case 14: case 15: v0 = 0; return true;                          // VTLB/VCommon/VInterrupt handler
+    case 17: case 19: v0 = 0; return true;                                  // Remove{Intc,Dmac}Handler
+    case 18: v0 = 1; return true;                                           // AddDmacHandler
+    case 20: case 21: case 22: case 23: v0 = 0; return true;                // _Enable/Disable{Intc,Dmac}
     case 32: v0 = 1; return true;   // CreateThread
     case 34: v0 = 0; return true;   // StartThread
     case 47: v0 = 1; return true;   // GetThreadId
@@ -78,7 +84,17 @@ static bool sys_handler(uint32_t num, uint32_t a0, uint32_t a1, uint32_t a2, uin
     case 124: v0 = 0; return true;
     case 125: case 126: v0 = 0; return true;
     case 127: v0 = 32*1024*1024; return true;
-    case 131: v0 = 0; return true;
+    case 131: {  // FindAddress — SEMANTIK ASLI (sama dgn crt0_test): scan u32 [a0..a1)
+                 // cari kata == *(u32*)a2; return alamat match atau a1 kalau tak ada.
+                 // Stub lama balikin 0 → walk ROM-handler FUN_003b6500 tak konvergen.
+        uint32_t pat = eebus::read32(a2);
+        uint32_t found = a1;
+        for (uint32_t ad = a0; ad < a1; ad += 4) {
+            if (eebus::read32(ad) == pat) { found = ad; break; }
+        }
+        v0 = found;
+        return true;
+    }
     default: v0 = 0; return true;
     }
 }
@@ -136,6 +152,16 @@ int main() {
     cpu.reset(0x100008);   // CRT0 entry — full init sequence
     cpu.set_sp(0x02000000);
     cpu.set_gp(0x0063fd48);
+
+    // "ROM kernel handler area" — jalur FindAddress walk FUN_003b6500 (setelah
+    // heap-clear @0x100198) nyari DUA kata penanda template di [0x80000000..0x80080000)
+    // dgn jarak 0xA4 (0x20c-0x168) utk nemuin basis handler ROM. Tanpa marker → walk
+    // infinite (bug 2026-10-19 sesi cron #8). Tanam marker persis seperti crt0_test.
+    {
+        const uint32_t ROMH = 0x80001000u;
+        eebus::write32(ROMH + 0x20c, eebus::read32(0x3b64a8));  // pat1
+        eebus::write32(ROMH + 0x168, eebus::read32(0x3b6470));  // pat2
+    }
 
     // setup renderer callback
     eekern::set_gif_kick(on_gif_kick);
