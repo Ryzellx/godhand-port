@@ -153,8 +153,30 @@ bool run(Cpu& c, SyscallFn handler, u64 max_inst) {
             case 0x04: w32(c, rd(inst), c.r[rt(inst)][0] << (c.r[rs(inst)][0] & 31)); break; // sllv
             case 0x06: w32(c, rd(inst), c.r[rt(inst)][0] >> (c.r[rs(inst)][0] & 31)); break; // srlv
             case 0x07: w32(c, rd(inst), (u32)((s32)c.r[rt(inst)][0] >> (c.r[rs(inst)][0] & 31))); break; // srav
-            case 0x08: c.next_pc = c.r[rs(inst)][0]; break;                            // jr
-            case 0x09: { u32 t = c.r[rs(inst)][0]; w32(c, rd(inst), c.next_pc); c.next_pc = t; break; } // jalr
+            case 0x08: {
+                u32 target = c.r[rs(inst)][0];
+                static uint32_t jr_count = 0;
+                if (jr_count++ < 20)
+                    std::fprintf(stderr, "[JR #%u] pc=0x%08x target=0x%08x rs=%u instret=%llu\n",
+                        jr_count, c.pc, target, rs(inst), (unsigned long long)c.instret);
+                c.next_pc = target; break;  // jr
+            }
+            case 0x09: {
+                u32 t = c.r[rs(inst)][0];
+                u32 ret = c.pc + 8;
+                w32(c, rd(inst), ret);
+                if (t == 0 || t >= 0x02000000) {
+                    // function pointer null/invalid — return ke caller
+                    static uint32_t null_fp = 0;
+                    if (null_fp++ < 5)
+                        std::fprintf(stderr, "[JALR NULL] pc=0x%08x target=0x%08x -> return 0x%08x\n",
+                            c.pc, t, ret);
+                    c.next_pc = ret;  // skip call
+                } else {
+                    c.next_pc = t;
+                }
+                break; // jalr
+            }
             case 0x0A: if (c.r[rt(inst)][0] == 0) w32(c, rd(inst), c.r[rs(inst)][0]); break; // movz
             case 0x0B: if (c.r[rt(inst)][0] != 0) w32(c, rd(inst), c.r[rs(inst)][0]); break; // movn
             case 0x0C: {  // SYSCALL — nomor di reg v1 (konvensi EE, terverifikasi)
@@ -247,10 +269,27 @@ bool run(Cpu& c, SyscallFn handler, u64 max_inst) {
             break;
         }
         // ---------- J / JAL ----------
-        case 0x02: c.next_pc = ((c.pc + 4) & 0xF0000000) | tgt(inst); break;
-        case 0x03: w32(c, 31, c.pc + 4); c.next_pc = ((c.pc + 4) & 0xF0000000) | tgt(inst); break; // jal: ra = pc(delay)+4 = P+8
+        case 0x02: {
+            u32 target = ((c.pc + 4) & 0xF0000000) | tgt(inst);
+            static uint32_t j_count = 0;
+            if (j_count++ < 15)
+                std::fprintf(stderr, "[J #%u] pc=0x%08x -> 0x%08x instret=%llu\n",
+                    j_count, c.pc, target, (unsigned long long)c.instret);
+            c.next_pc = target; break;
+        }
+        case 0x03: w32(c, 31, c.pc + 8); c.next_pc = ((c.pc + 4) & 0xF0000000) | tgt(inst); break; // jal: ra = P+8 (return addr)
         // ---------- BRANCH ----------
-        case 0x04: if (c.r[rs(inst)][0] == c.r[rt(inst)][0]) c.next_pc = c.pc + (sx16(imm(inst)) << 2); break; // beq
+        case 0x04: {
+            u32 target = c.pc + 4 + (sx16(imm(inst)) << 2);
+            if (c.r[rs(inst)][0] == c.r[rt(inst)][0]) {
+                static uint32_t beq_count = 0;
+                if (beq_count++ < 10)
+                    std::fprintf(stderr, "[BEQ taken #%u] pc=0x%08x -> 0x%08x instret=%llu\n",
+                        beq_count, c.pc, target, (unsigned long long)c.instret);
+                c.next_pc = target;
+            }
+            break; // beq: target = P+4+offset*4
+        }
         case 0x14: if (c.r[rs(inst)][0] == c.r[rt(inst)][0]) c.next_pc = c.pc + (sx16(imm(inst)) << 2);
                    else c.next_pc = c.pc + 4; break;                                    // beql
         case 0x15: if (c.r[rs(inst)][0] != c.r[rt(inst)][0]) c.next_pc = c.pc + (sx16(imm(inst)) << 2);
@@ -336,7 +375,26 @@ bool run(Cpu& c, SyscallFn handler, u64 max_inst) {
             static uint32_t pc_ring[16] = {};
             static uint32_t pc_ri = 0;
             pc_ring[pc_ri++ & 15] = c.pc;
-            if (c.pc >= 0x02000000 || c.next_pc >= 0x02000000) {
+            // trace first entry into stack area
+            static bool in_stack = false;
+            if (!in_stack && c.next_pc >= 0x003B3D00 && c.next_pc < 0x02000000 && c.instret > 100000) {
+                in_stack = true;
+                std::fprintf(stderr, "[CODE_END] pc=0x%08x next=0x%08x instret=%llu ra=0x%08x sp=0x%08x\n",
+                    c.pc, c.next_pc, (unsigned long long)c.instret, c.r[31][0], c.r[29][0]);
+                for (int i = 1; i <= 16; i++)
+                    std::fprintf(stderr, "  pc[%2d]=0x%08x\n", i, pc_ring[(pc_ri + i - 1) & 15]);
+                // dump register file for diagnosis
+                for (int r = 1; r < 32; r++)
+                    if (c.r[r][0]) std::fprintf(stderr, "  r%-2d=0x%08x\n", r, c.r[r][0]);
+            }
+            // code bounds: .text ends at 0x003B3D00 (ELF section)
+        if (c.next_pc >= 0x003B3D00 && c.next_pc < 0x10000000) {
+            std::fprintf(stderr, "[CODE_BOUNDS] pc=0x%08x next=0x%08x instret=%llu — STOP (past .text)\n",
+                c.pc, c.next_pc, (unsigned long long)c.instret);
+            fault("code_end");
+            return true;
+        }
+        if (c.pc >= 0x02000000 || c.next_pc >= 0x02000000) {
                 std::fprintf(stderr, "[CRASH] pc=0x%08x next=0x%08x instret=%llu\n",
                     c.pc, c.next_pc, (unsigned long long)c.instret);
                 std::fprintf(stderr, "[CRASH] ra=0x%08x sp=0x%08x gp=0x%08x\n",
