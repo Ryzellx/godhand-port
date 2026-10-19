@@ -111,7 +111,9 @@ static bool sys_handler(u32 num, u32 a0, u32 a1, u32 a2, u32 a3, u32& v0) {
     }
     if (num == 0) { v0 = 0; return true; }   // RFU0/noop passthrough
     v0 = 0;
-    return false;              // unknown -> stop (di luar crt0 scope)
+    // generic stub — unknown syscall return 0, jangan stop
+    v0 = 0;
+    return true;
 }
 
 static void load_elf_into_bus(const char* path) {

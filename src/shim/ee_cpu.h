@@ -29,6 +29,14 @@ struct Cpu {
     u32 f[32]{};             // FPR 32-bit single (EE FPU = single only)
     u32 facc = 0;            // FPU accumulator (ADDA/MULA/MADD.S family)
     u32 fcsr = 0;
+    // VU0 (7b.8): VF[32] 128-bit (4 lane u32) + accumulator 128-bit + status.
+    // VF0 di-hw = zero register baca (tulis = no-op di mode macro; di sini: tulis
+    // dijaga tetap boleh utk kesederhanaan — game tidak menulis vf0 utk data).
+    u32 vf[32][4]{};         // vector registers (LE: [0]=bits0..31)
+    u32 vacc[4]{};           // MAC accumulator 128-bit (untuk MULA/MSUB family)
+    u32 vcctl[16]{};         // control regs: 0=status 1=macflag 2=clipflag 3=R 4=I
+    u64 vu_macro_hits = 0;   // census: instruksi VU0 macro dieksekusi
+    u64 vu_lqc2 = 0, vu_sqc2 = 0;  // census load/store VF
     u32 cop0[32]{};  // COP0: Status/Cause/EPC/Count/... (MFC0/MTC0)
     u64 instret = 0;         // instruksi dieksekusi (bukti)
     u32 fault_pc = 0, fault_op = 0;   // diagnosis crash (fault_pc = ALAMAT SETELAH

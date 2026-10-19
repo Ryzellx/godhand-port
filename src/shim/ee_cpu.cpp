@@ -277,6 +277,61 @@ bool run(Cpu& c, SyscallFn handler, u64 max_inst) {
             }
             break;
         }
+        // ---------- VU0 (COP2) — LQC2/SQC2 ----------
+        case 0x36: {  // LQC2 — Load Quadword COP2 (VU0)
+            u32 a = c.r[rs(inst)][0] + sx16(imm(inst));
+            u32 vf = rt(inst);
+            for (int i = 0; i < 4; i++) c.vf[vf][i] = eebus::read32(a + i * 4);
+            break;
+        }
+        case 0x3E: {  // SQC2 — Store Quadword COP2 (VU0)
+            u32 a = c.r[rs(inst)][0] + sx16(imm(inst));
+            u32 vf = rt(inst);
+            for (int i = 0; i < 4; i++) eebus::write32(a + i * 4, c.vf[vf][i]);
+            break;
+        }
+        case 0x12: {  // COP2 — VU0 microinstructions
+            // encoding: op(6) rs(5) ft(5) fs(5) fd(5) fn(6)
+            // vmove: fn=0x3C, vmr32: fn=0x3D
+            u32 ft = rt(inst);  // destination vector reg
+            u32 fs = rd(inst);  // source vector reg (in MIPS encoding)
+            u32 fd = (inst >> 6) & 0x1F;  // another reg
+            u32 fn = inst & 0x3F;
+            switch (fn) {
+            case 0x3C:  // vmove.xyzw vd, vs
+                for (int i = 0; i < 4; i++) c.vf[ft][i] = c.vf[fs][i];
+                break;
+            case 0x3D:  // vmr32.xyzw vd, vs (rotate right 32 bits = shift components)
+                c.vf[ft][0] = c.vf[fs][1];
+                c.vf[ft][1] = c.vf[fs][2];
+                c.vf[ft][2] = c.vf[fs][3];
+                c.vf[ft][3] = c.vf[fs][0];
+                break;
+            case 0x2C:  // vadd.xyzw
+                for (int i = 0; i < 4; i++) {
+                    float a, b;
+                    memcpy(&a, &c.vf[fs][i], 4);
+                    memcpy(&b, &c.vf[fd][i], 4);
+                    float r = a + b;
+                    memcpy(&c.vf[ft][i], &r, 4);
+                }
+                break;
+            case 0x2D:  // vsub.xyzw
+                for (int i = 0; i < 4; i++) {
+                    float a, b;
+                    memcpy(&a, &c.vf[fs][i], 4);
+                    memcpy(&b, &c.vf[fd][i], 4);
+                    float r = a - b;
+                    memcpy(&c.vf[ft][i], &r, 4);
+                }
+                break;
+            default:
+                // generic: copy source to dest (best-effort)
+                for (int i = 0; i < 4; i++) c.vf[ft][i] = c.vf[fs][i];
+                break;
+            }
+            break;
+        }
         // ---------- COP1 (FPU) — top-level ----------
         case 0x11: {
             u32 rs_f = (inst >> 21) & 0x1F;
@@ -428,7 +483,7 @@ bool run(Cpu& c, SyscallFn handler, u64 max_inst) {
                      c.f[r] = eebus::read32(a); c.f[(r + 1) & 31] = eebus::read32(a + 4); break; }
         case 0x3D: { u32 a = c.r[rs(inst)][0] + sx16(imm(inst)), r = rt(inst);          // sdc1 pair
                      eebus::write32(a, c.f[r]); eebus::write32(a + 4, c.f[(r + 1) & 31]); break; }
-        case 0x2A: do_sdl(c.r[rs(inst)][0] + sx16(imm(inst)), g64(c, rt(inst))); break;  // sdl
+        case 0x2C: do_sdl(c.r[rs(inst)][0] + sx16(imm(inst)), g64(c, rt(inst))); break;  // sdl (FIX: op=0x2C bukan 0x2A)
         case 0x2D: do_sdr(c.r[rs(inst)][0] + sx16(imm(inst)), g64(c, rt(inst))); break;  // sdr
         case 0x2E: do_swr(c.r[rs(inst)][0] + sx16(imm(inst)), c.r[rt(inst)][0]); break;  // swr
         case 0x2F: break;   // CACHE — native: tak ada cache koheren perlu disentuh
@@ -456,6 +511,14 @@ bool run(Cpu& c, SyscallFn handler, u64 max_inst) {
             else if (crs == 4) c.cop0[crd] = c.r[crt][0];      // MTC0
             else if (crs == 0x10) {                            // CO ops (tlb/eret)
                 u32 f = fn(inst);
+                if (f == 0x38) {                               // EI (Enable Interrupt)
+                    c.cop0[12] |= 1;  // set IE bit in Status
+                    break;
+                }
+                if (f == 0x39) {                               // DI (Disable Interrupt)
+                    c.cop0[12] &= ~1u;  // clear IE bit
+                    break;
+                }
                 if (f == 0x18) {                               // ERET: pc = ErrorEPC (cop0 r31)
                     static uint32_t eret_n = 0;
                     if (eret_n++ < 5)
