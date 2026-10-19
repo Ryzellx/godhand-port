@@ -95,7 +95,7 @@ int main() {
                 if (sx < 0) sx = 0; if (sx >= (int)W) sx = W-1;
                 if (sy < 0) sy = 0; if (sy >= (int)H) sy = H-1;
                 put_qw(pkt, gs::pack_rgbaq(r, g, b, 128));
-                put_qw(pkt, gs::pack_xyz2(sx << 4, sy << 4, 0));
+                put_qw(pkt, gs::pack_xyz2((uint16_t)((int)sx << 4), (uint16_t)((int)sy << 4), 0));
             }
         }
     }

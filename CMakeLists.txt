@@ -84,3 +84,10 @@ add_executable(direct_render
   src/vk/vk_backend.cpp)
 target_include_directories(direct_render PRIVATE src/vk)
 target_link_libraries(direct_render PRIVATE Vulkan::Vulkan)
+
+# rotate_render: model Gene berputar 360 derajat
+add_executable(rotate_render
+  src/slice/rotate_render.cpp
+  src/vk/vk_backend.cpp)
+target_include_directories(rotate_render PRIVATE src/vk)
+target_link_libraries(rotate_render PRIVATE Vulkan::Vulkan)
