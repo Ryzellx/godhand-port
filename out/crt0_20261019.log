@@ -1,0 +1,45 @@
+[J #1] pc=0x003bafd8 -> 0x003224f8 instret=19
+[BEQ taken #1] pc=0x00322510 -> 0x00322550 instret=26
+[J #2] pc=0x00322558 -> 0x003a7b48 instret=29
+[J #3] pc=0x0010024c -> 0x003b6820 instret=35
+[J #4] pc=0x003b681c -> 0x003b7c18 instret=42
+[JR #1] pc=0x003b010c target=0x003b7c28 rs=31 instret=50
+[BEQ taken #2] pc=0x003b63b0 -> 0x003b63e8 instret=94
+[JR #2] pc=0x003b63ec target=0x003b1fe0 rs=31 instret=96
+[J #5] pc=0x003b0e60 -> 0x003b0d48 instret=157
+[JR #3] pc=0x003b0d7c target=0x003b1e80 rs=31 instret=171
+[JR #4] pc=0x003b1e8c target=0x003b1d68 rs=31 instret=175
+[BEQ taken #3] pc=0x003b1d74 -> 0x003b1670 instret=179
+[BEQ taken #4] pc=0x003b170c -> 0x003b176c instret=186
+[BEQ taken #5] pc=0x003b1770 -> 0x003b17a8 instret=188
+[BEQ taken #6] pc=0x003b17b4 -> 0x003b18d4 instret=192
+[BEQ taken #7] pc=0x003b18fc -> 0x003b1920 instret=203
+[BEQ taken #8] pc=0x003b1940 -> 0x003b1a4c instret=208
+[BEQ taken #9] pc=0x003b1a50 -> 0x003b1c30 instret=210
+[BEQ taken #10] pc=0x003b1c94 -> 0x003b1ce0 instret=216
+[J #6] pc=0x003b0e60 -> 0x003b0d48 instret=237
+[JR #5] pc=0x003b0d7c target=0x003b1e80 rs=31 instret=251
+[JR #6] pc=0x003b1e8c target=0x003b1d00 rs=31 instret=255
+[J #7] pc=0x003b0e60 -> 0x003b0d48 instret=278
+[JR #7] pc=0x003b0d7c target=0x003b1e80 rs=31 instret=292
+[JR #8] pc=0x003b1e8c target=0x003b1d00 rs=31 instret=296
+[J #8] pc=0x003b0e60 -> 0x003b0d48 instret=319
+[JR #9] pc=0x003b0d7c target=0x003b1e80 rs=31 instret=333
+[JR #10] pc=0x003b1e8c target=0x003b1d00 rs=31 instret=337
+[J #9] pc=0x003b0e60 -> 0x003b0d48 instret=360
+[JR #11] pc=0x003b0d7c target=0x003b1e80 rs=31 instret=374
+[JR #12] pc=0x003b1e8c target=0x003b1d00 rs=31 instret=378
+[J #10] pc=0x003b0e60 -> 0x003b0d48 instret=401
+[JR #13] pc=0x003b0d7c target=0x003b1e80 rs=31 instret=415
+[JR #14] pc=0x003b1e8c target=0x003b1d00 rs=31 instret=419
+[J #11] pc=0x003b0e60 -> 0x003b0d48 instret=442
+[JR #15] pc=0x003b0d7c target=0x003b1e80 rs=31 instret=456
+[JR #16] pc=0x003b1e8c target=0x003b1d00 rs=31 instret=460
+[J #12] pc=0x003b0e60 -> 0x003b0d48 instret=483
+[JR #17] pc=0x003b0d7c target=0x003b1e80 rs=31 instret=497
+[JR #18] pc=0x003b1e8c target=0x003b1d00 rs=31 instret=501
+[J #13] pc=0x003b0e60 -> 0x003b0d48 instret=524
+[JR #19] pc=0x003b0d7c target=0x003b1e80 rs=31 instret=538
+[JR #20] pc=0x003b1e8c target=0x003b1d00 rs=31 instret=542
+[J #14] pc=0x003b0e60 -> 0x003b0d48 instret=565
+[J #15] pc=0x003b0e60 -> 0x003b0d48 instret=606

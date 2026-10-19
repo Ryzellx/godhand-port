@@ -1,0 +1,137 @@
+[J #1] pc=0x003bafd8 -> 0x003224f8 instret=19
+[BEQ taken #1] pc=0x00322510 -> 0x00322550 instret=26
+[J #2] pc=0x00322558 -> 0x003a7b48 instret=29
+[J #3] pc=0x0010024c -> 0x003b6820 instret=35
+[J #4] pc=0x003b681c -> 0x003b7c18 instret=42
+[JR #1] pc=0x003b010c target=0x003b7c28 rs=31 instret=50
+[BEQ taken #2] pc=0x003b63b0 -> 0x003b63e8 instret=94
+[JR #2] pc=0x003b63ec target=0x003b1fe0 rs=31 instret=96
+[J #5] pc=0x003b0e60 -> 0x003b0d48 instret=157
+[JR #3] pc=0x003b0d7c target=0x003b1e80 rs=31 instret=171
+[JR #4] pc=0x003b1e8c target=0x003b1d68 rs=31 instret=175
+[BEQ taken #3] pc=0x003b1d74 -> 0x003b1670 instret=179
+[BEQ taken #4] pc=0x003b170c -> 0x003b176c instret=186
+[BEQ taken #5] pc=0x003b1770 -> 0x003b17a8 instret=188
+[BEQ taken #6] pc=0x003b17b4 -> 0x003b18d4 instret=192
+[BEQ taken #7] pc=0x003b18fc -> 0x003b1920 instret=203
+[BEQ taken #8] pc=0x003b1940 -> 0x003b1a4c instret=208
+[BEQ taken #9] pc=0x003b1a50 -> 0x003b1c30 instret=210
+[BEQ taken #10] pc=0x003b1c94 -> 0x003b1ce0 instret=216
+[J #6] pc=0x003b0e60 -> 0x003b0d48 instret=237
+[JR #5] pc=0x003b0d7c target=0x003b1e80 rs=31 instret=251
+[JR #6] pc=0x003b1e8c target=0x003b1d00 rs=31 instret=255
+[J #7] pc=0x003b0e60 -> 0x003b0d48 instret=278
+[JR #7] pc=0x003b0d7c target=0x003b1e80 rs=31 instret=292
+[JR #8] pc=0x003b1e8c target=0x003b1d00 rs=31 instret=296
+[J #8] pc=0x003b0e60 -> 0x003b0d48 instret=319
+[JR #9] pc=0x003b0d7c target=0x003b1e80 rs=31 instret=333
+[JR #10] pc=0x003b1e8c target=0x003b1d00 rs=31 instret=337
+[J #9] pc=0x003b0e60 -> 0x003b0d48 instret=360
+[JR #11] pc=0x003b0d7c target=0x003b1e80 rs=31 instret=374
+[JR #12] pc=0x003b1e8c target=0x003b1d00 rs=31 instret=378
+[J #10] pc=0x003b0e60 -> 0x003b0d48 instret=401
+[JR #13] pc=0x003b0d7c target=0x003b1e80 rs=31 instret=415
+[JR #14] pc=0x003b1e8c target=0x003b1d00 rs=31 instret=419
+[J #11] pc=0x003b0e60 -> 0x003b0d48 instret=442
+[JR #15] pc=0x003b0d7c target=0x003b1e80 rs=31 instret=456
+[JR #16] pc=0x003b1e8c target=0x003b1d00 rs=31 instret=460
+[J #12] pc=0x003b0e60 -> 0x003b0d48 instret=483
+[JR #17] pc=0x003b0d7c target=0x003b1e80 rs=31 instret=497
+[JR #18] pc=0x003b1e8c target=0x003b1d00 rs=31 instret=501
+[J #13] pc=0x003b0e60 -> 0x003b0d48 instret=524
+[JR #19] pc=0x003b0d7c target=0x003b1e80 rs=31 instret=538
+[JR #20] pc=0x003b1e8c target=0x003b1d00 rs=31 instret=542
+[J #14] pc=0x003b0e60 -> 0x003b0d48 instret=565
+[J #15] pc=0x003b0e60 -> 0x003b0d48 instret=606
+timing: 0.11 s (27.0 M inst/s)
+crt0 run: instret=3000000 stop=clean-cap pc=0x003b0e3c
+syscalls seen: 0 ->
+syscall census: 115:50 127:1 | distinct=2 total=51
+hot-pc top12 (samples=45/3000000 instr):
+  0x003b0d50 text    n=2           4.44%
+  0x003b0e58 text    n=2           4.44%
+  0x003b1cf4 text    n=2           4.44%
+  0x003b1d08 text    n=2           4.44%
+  0x003b0d48 text    n=1           2.22%
+  0x003b0d4c text    n=1           2.22%
+  0x003b0d54 text    n=1           2.22%
+  0x003b0d58 text    n=1           2.22%
+  0x003b0d5c text    n=1           2.22%
+  0x003b0d60 text    n=1           2.22%
+  0x003b0d64 text    n=1           2.22%
+  0x003b0d68 text    n=1           2.22%
+backward-branch census top8 (total=292673):
+  0x003b1e78 n=73167
+  0x003b0e5c n=73166
+  0x003b1e88 n=73166
+  0x003b1d08 n=73165
+  0x0031db7c n=1
+  0x003a7b50 n=1
+  0x003b1d70 n=1
+  0x003b1ffc n=1
+trace last 64 pc (oldest->newest):
+  [0] 0x003b0d7c text op=a0640000
+  [1] 0x003b1e80 text op=dfbf0000
+  [2] 0x003b1e84 text op=24020001
+  [3] 0x003b1e88 text op=03e00008
+  [4] 0x003b1e8c text op=27bd0010
+  [5] 0x003b1d00 text op=8fa40058
+  [6] 0x003b1d04 text op=00822021
+  [7] 0x003b1d08 text op=1600fff7
+  [8] 0x003b1d0c text op=afa40058
+  [9] 0x003b1ce8 text op=8fa40048
+  [10] 0x003b1cec text op=24060030
+  [11] 0x003b1cf0 text op=8fa5005c
+  [12] 0x003b1cf4 text op=8fa30044
+  [13] 0x003b1cf8 text op=0060f809
+  [14] 0x003b1cfc text op=2610ffff
+  [15] 0x003b1e68 text op=27bdfff0
+  [16] 0x003b1e6c text op=00c0202d
+  [17] 0x003b1e70 text op=10800003
+  [18] 0x003b1e74 text op=ffbf0000
+  [19] 0x003b1e78 text op=0c0ec38c
+  [20] 0x003b1e7c text op=00000000
+  [21] 0x003b0e30 text op=27bdfff0
+  [22] 0x003b0e34 text op=2402000a
+  [23] 0x003b0e38 text op=14820007
+  [24] 0x003b0e3c text op=ffbf0000
+  [25] 0x003b0e58 text op=dfbf0000
+  [26] 0x003b0e5c text op=080ec352
+  [27] 0x003b0e60 text op=27bd0010
+  [28] 0x003b0d48 text op=3c031000
+  [29] 0x003b0d4c text op=3463f130
+  [30] 0x003b0d50 text op=8c620000
+  [31] 0x003b0d54 text op=30428000
+  [32] 0x003b0d58 text op=00000000
+  [33] 0x003b0d5c text op=00000000
+  [34] 0x003b0d60 text op=00000000
+  [35] 0x003b0d64 text op=1440fffa
+  [36] 0x003b0d68 text op=00000000
+  [37] 0x003b0d6c text op=3c031000
+  [38] 0x003b0d70 text op=0080102d
+  [39] 0x003b0d74 text op=3463f180
+  [40] 0x003b0d78 text op=03e00008
+  [41] 0x003b0d7c text op=a0640000
+  [42] 0x003b1e80 text op=dfbf0000
+  [43] 0x003b1e84 text op=24020001
+  [44] 0x003b1e88 text op=03e00008
+  [45] 0x003b1e8c text op=27bd0010
+  [46] 0x003b1d00 text op=8fa40058
+  [47] 0x003b1d04 text op=00822021
+  [48] 0x003b1d08 text op=1600fff7
+  [49] 0x003b1d0c text op=afa40058
+  [50] 0x003b1ce8 text op=8fa40048
+  [51] 0x003b1cec text op=24060030
+  [52] 0x003b1cf0 text op=8fa5005c
+  [53] 0x003b1cf4 text op=8fa30044
+  [54] 0x003b1cf8 text op=0060f809
+  [55] 0x003b1cfc text op=2610ffff
+  [56] 0x003b1e68 text op=27bdfff0
+  [57] 0x003b1e6c text op=00c0202d
+  [58] 0x003b1e70 text op=10800003
+  [59] 0x003b1e74 text op=ffbf0000
+  [60] 0x003b1e78 text op=0c0ec38c
+  [61] 0x003b1e7c text op=00000000
+  [62] 0x003b0e30 text op=27bdfff0
+  [63] 0x003b0e34 text op=2402000a
+FAIL: urutan syscall crt0 tidak sesuai
