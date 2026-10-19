@@ -42,13 +42,16 @@ static void render() {
 
     for (uint32_t t = 0; t < tri_count; t++) {
         uint32_t base = t * 3;
-        // texture-like coloring from UV
+        // texture-like coloring from UV + normal shading
         float u = g_verts[base*5+3], v = g_verts[base*5+4];
         float nz = g_verts[base*5+2] - g_verts[(base+1)*5+2];
-        uint8_t r = (uint8_t)(60 + u * 180);
-        uint8_t g = (uint8_t)(40 + v * 12);
-        uint8_t b = (uint8_t)(120 + nz * 60 + 60);
+        // Gene's outfit: purple/blue gradient
+        uint8_t r = (uint8_t)(100 + u * 80 + nz * 40);
+        uint8_t g = (uint8_t)(60 + v * 40 + nz * 30);
+        uint8_t b = (uint8_t)(160 + u * 60 + nz * 20);
+        if (r > 255) r = 255;
         if (g > 255) g = 255;
+        if (b > 255) b = 255;
 
         int px[3], py[3];
         for (uint32_t vi = 0; vi < 3; vi++) {

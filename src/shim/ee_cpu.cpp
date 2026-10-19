@@ -175,7 +175,6 @@ bool run(Cpu& c, SyscallFn handler, u64 max_inst) {
                     // jr ke null/invalid — skip (continue ke next instruction)
                     static uint32_t jr_null = 0;
                     if (jr_null++ < 5)
-                        std::fprintf(stderr, "[JR NULL] pc=0x%08x target=0x%08x -> skip\n", c.pc, target);
                     c.next_pc = c.pc + 8;  // skip delay slot + this
                 } else {
                     c.next_pc = target;
@@ -190,8 +189,7 @@ bool run(Cpu& c, SyscallFn handler, u64 max_inst) {
                     // function pointer null/invalid — return ke caller
                     static uint32_t null_fp = 0;
                     if (null_fp++ < 5)
-                        std::fprintf(stderr, "[JALR NULL] pc=0x%08x target=0x%08x -> return 0x%08x\n",
-                            c.pc, t, ret);
+                        std::fprintf(stderr, "[JALR NULL] pc=0x%08x target=0x%08x -> return 0x%08x\n", c.pc, t, ret);
                     c.next_pc = ret;  // skip call
                 } else {
                     c.next_pc = t;
@@ -347,7 +345,13 @@ bool run(Cpu& c, SyscallFn handler, u64 max_inst) {
         }
         // ---------- BRANCH ----------
         case 0x04: {
-            u32 target = c.pc + 4 + (sx16(imm(inst)) << 2);
+            u32 target = c.pc + (sx16(imm(inst)) << 2);  // FIX: tanpa +4 (verified vs objdump)
+            // trace heap-clear loop — setiap instruction
+            if (c.pc >= 0x100158 && c.pc <= 0x100178 && c.instret < 20) {
+                std::fprintf(stderr, "[CLEAR] pc=0x%08x v0=0x%08x a0=0x%08x v1=0x%08x instret=%llu\n",
+                    c.pc, c.r[2][0], c.r[4][0], c.r[3][0], (unsigned long long)c.instret);
+            }
+
             if (c.r[rs(inst)][0] == c.r[rt(inst)][0]) {
                 static uint32_t beq_count = 0;
                 if (beq_count++ < 10)
