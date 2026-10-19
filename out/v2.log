@@ -1,0 +1,22 @@
+[pl00v2] render via GIF pipeline
+[pl00v2] 8349 vertices
+[pl00v2] packet: 267360 bytes
+[pl00v2] actions: 16707
+[pl00v2] vertices: 8349 (xyz_count=8349)
+[pl00v2] v[0] x=328.0 y=23.0 r=0.47 g=0.60 b=0.71
+[pl00v2] v[1] x=320.0 y=21.0 r=0.47 g=0.60 b=0.71
+[pl00v2] v[2] x=330.0 y=27.0 r=0.47 g=0.60 b=0.71
+[pl00v2] v[3] x=320.0 y=28.0 r=0.47 g=0.59 b=0.71
+[pl00v2] v[4] x=329.0 y=32.0 r=0.47 g=0.59 b=0.71
+[pl00v2] v[5] x=320.0 y=32.0 r=0.47 g=0.59 b=0.71
+[vkphase] instance
+[vkphase] enumerate
+[vkphase] device
+[vkphase] image+mem+view
+[vkphase] renderpass
+[vkphase] framebuffer
+[vkphase] cmdpool+fence
+[vkphase] shaders+layout
+[vkphase] pipeline
+[pl00v2] non-bg: 286720 (100.0%)
+PASS

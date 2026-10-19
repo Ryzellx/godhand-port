@@ -91,3 +91,12 @@ add_executable(rotate_render
   src/vk/vk_backend.cpp)
 target_include_directories(rotate_render PRIVATE src/vk)
 target_link_libraries(rotate_render PRIVATE Vulkan::Vulkan)
+
+# pl00_v2: GIF pipeline fix — semua vertex dalam satu tag
+add_executable(pl00_v2
+  src/slice/pl00_v2.cpp
+  src/gif/gif.cpp
+  src/gs/gs_state.cpp
+  src/vk/vk_backend.cpp)
+target_include_directories(pl00_v2 PRIVATE src/gif src/gs src/vk)
+target_link_libraries(pl00_v2 PRIVATE Vulkan::Vulkan)

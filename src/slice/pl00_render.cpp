@@ -126,8 +126,16 @@ int main() {
             pending.a = 1.0f;
         } else if (a.kind == Action::XYZ_WRITE) {
             uint64_t w = a.ad_data;
+            static uint32_t xyz_count = 0;
+            xyz_count++;
+            if (xyz_count <= 3 || xyz_count % 1000 == 0)
+                std::printf("[DBG] XYZ_WRITE #%u w=%016llx\n", xyz_count, (unsigned long long)w);
             pending.x = (float)(int)((w >> 0) & 0xFFFF) / 16.0f;
             pending.y = (float)(int)((w >> 16) & 0xFFFF) / 16.0f;
+            if (batch.size() < 6) {
+                std::printf("[DBG] XYZ_WRITE[%zu] w=%016llx x=%.1f y=%.1f\n",
+                    batch.size(), (unsigned long long)w, pending.x, pending.y);
+            }
             batch.push_back(pending);
         }
     }
