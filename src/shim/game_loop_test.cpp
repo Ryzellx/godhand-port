@@ -89,6 +89,49 @@ int main() {
 
     // setup CPU
     eebus::reset();
+    
+    // LOAD ELF ke RAM — critical! Tanpa ini CPU executing zeros
+    {
+        FILE* ef = fopen("/root/ports/godhand/extract/SLUS_215.03", "rb");
+        if (!ef) { std::printf("FAIL: ELF not found\n"); return 1; }
+        fseek(ef, 0, SEEK_END);
+        long esz = ftell(ef);
+        fseek(ef, 0, SEEK_SET);
+        std::vector<uint8_t> ebuf(esz);
+        fread(ebuf.data(), 1, esz, ef);
+        fclose(ef);
+        
+        // Parse ELF program headers dan load ke RAM
+        if (esz > 64 && ebuf[0] == 0x7F && ebuf[1] == 'E') {
+            uint32_t phoff = *(uint32_t*)(&ebuf[28]);
+            uint16_t phentsize = *(uint16_t*)(&ebuf[42]);
+            uint16_t phnum = *(uint16_t*)(&ebuf[44]);
+            
+            for (int i = 0; i < phnum; i++) {
+                uint32_t off = phoff + i * phentsize;
+                if (off + 32 > (uint32_t)esz) break;
+                uint32_t type = *(uint32_t*)(&ebuf[off]);
+                if (type != 1) continue;  // PT_LOAD only
+                
+                uint32_t poff = *(uint32_t*)(&ebuf[off + 4]);   // p_offset
+                uint32_t vaddr = *(uint32_t*)(&ebuf[off + 8]);  // p_vaddr
+                uint32_t filesz = *(uint32_t*)(&ebuf[off + 16]); // p_filesz
+                uint32_t memsz = *(uint32_t*)(&ebuf[off + 20]);  // p_memsz
+                
+                std::printf("[ELF] load: vaddr=0x%08x filesz=%u memsz=%u\n", vaddr, filesz, memsz);
+                
+                // copy file data ke RAM
+                for (uint32_t j = 0; j < filesz && poff + j < (uint32_t)esz; j++) {
+                    eebus::write8(vaddr + j, ebuf[poff + j]);
+                }
+                // zero remaining (BSS)
+                for (uint32_t j = filesz; j < memsz; j++) {
+                    eebus::write8(vaddr + j, 0);
+                }
+            }
+            std::printf("[ELF] loaded successfully\n");
+        }
+    }
     eecpu::Cpu cpu;
     cpu.reset(0x100008);   // CRT0 entry — full init sequence
     cpu.set_sp(0x02000000);
@@ -97,6 +140,22 @@ int main() {
     // setup renderer callback
     eekern::set_gif_kick(on_gif_kick);
     std::printf("[game] GIF kick callback registered\n");
+
+    // setup function table: pointer ke array of function pointers, ending dengan 0
+    // dispatcher di 0x31da48: v0 = *(0x3c4080); v1 = *v0; if v1==0 return; jalr v1; v0 += 4; loop
+    const uint32_t TABLE_ADDR = 0x003D0000;  // di RAM, bukan code area
+    const uint32_t RETURN_STUB = 0x00100248; // crt0 return point
+    
+    // buat table: 16 entries, semua point ke RETURN_STUB (no-op functions)
+    for (int i = 0; i < 16; i++) {
+        eebus::write32(TABLE_ADDR + i * 4, RETURN_STUB);
+    }
+    eebus::write32(TABLE_ADDR + 16 * 4, 0);  // terminator
+    
+    // set function table pointer
+    eebus::write32(0x3c4080, TABLE_ADDR);
+    
+    std::printf("[game] function table: %u entries at 0x%08x -> 0x%08x\n", 16, TABLE_ADDR, RETURN_STUB);
 
     // init vtable di 0x3c4080 (function pointer table yang game expects)
     for (uint32_t i = 0; i < 256; i++) {

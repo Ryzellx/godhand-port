@@ -154,6 +154,11 @@ bool run(Cpu& c, SyscallFn handler, u64 max_inst) {
 
         auto fault = [&](const char* why) { c.fault = why; c.fault_pc = c.pc; };
 
+        static uint32_t op_trace = 0;
+        if (op_trace++ < 20) {
+            std::fprintf(stderr, "[OP] pc=0x%08x op=0x%02x inst=0x%08x instret=%llu\n",
+                c.pc, op(inst), inst, (unsigned long long)c.instret);
+        }
         switch (op(inst)) {
         // ---------- SPECIAL ----------
         case 0x00: {
@@ -257,7 +262,32 @@ bool run(Cpu& c, SyscallFn handler, u64 max_inst) {
             case 0x3C: w64(c, rd(inst), g64(c, rt(inst)) << (sa_f(inst) + 32)); break; // dsll32
             case 0x3E: w64(c, rd(inst), g64(c, rt(inst)) >> (sa_f(inst) + 32)); break; // dsrl32
             case 0x3F: w64(c, rd(inst), (u64)((s64)g64(c, rt(inst)) >> (sa_f(inst) + 32))); break; // dsra32
+        case 0x1C: {  // SPECIAL2 (MMI)
+            u32 f = fn(inst) & 0x3F;
+            switch (f) {
+            case 0x28: w32(c, rd(inst), c.r[rs(inst)][0] + c.r[rt(inst)][0]); break; // padduw
+            case 0x29: w32(c, rd(inst), c.r[rs(inst)][0] - c.r[rt(inst)][0]); break; // psubuw
+            case 0x00: w32(c, rd(inst), c.r[rs(inst)][0]); break;
+            case 0x01: w32(c, rd(inst), c.r[rs(inst)][0]); break;
+            case 0x20: w32(c, rd(inst), c.r[rs(inst)][0] + c.r[rt(inst)][0]); break;
+            case 0x21: w32(c, rd(inst), c.r[rs(inst)][0] - c.r[rt(inst)][0]); break;
+            default: w32(c, rd(inst), c.r[rs(inst)][0]); break;
+            }
+            break;
+        }
         default: fault("SPECIAL fn unknown"); return true;
+            }
+            break;
+        }
+        // ---------- COP1 (FPU) — top-level ----------
+        case 0x11: {
+            u32 rs_f = (inst >> 21) & 0x1F;
+            switch (rs_f) {
+            case 0x00: w32(c, rt(inst), c.f[rd(inst)]); break;  // mfc1
+            case 0x04: c.f[rd(inst)] = c.r[rt(inst)][0]; break;  // mtc1
+            case 0x02: w32(c, rt(inst), 0); break;  // cfc1
+            case 0x06: break;  // ctc1
+            default: break;
             }
             break;
         }
@@ -279,7 +309,21 @@ bool run(Cpu& c, SyscallFn handler, u64 max_inst) {
             case 0x1B: take = v > 0; break;   // (jarang; kalau kena akan muncul di census)
             case 0x30: c.sa = (c.r[rs(inst)][0] & 0xF) << 1; take = false; break;  // MTSAB
             case 0x31: c.sa = (c.r[rs(inst)][0] & 0x7) << 2; take = false; break;  // MTSAH
-            default: fault("REGIMM unknown"); return true;
+            
+        case 0x1C: {  // SPECIAL2 (MMI)
+            u32 f = fn(inst) & 0x3F;
+            switch (f) {
+            case 0x28: w32(c, rd(inst), c.r[rs(inst)][0] + c.r[rt(inst)][0]); break; // padduw
+            case 0x29: w32(c, rd(inst), c.r[rs(inst)][0] - c.r[rt(inst)][0]); break; // psubuw
+            case 0x00: w32(c, rd(inst), c.r[rs(inst)][0]); break;
+            case 0x01: w32(c, rd(inst), c.r[rs(inst)][0]); break;
+            case 0x20: w32(c, rd(inst), c.r[rs(inst)][0] + c.r[rt(inst)][0]); break;
+            case 0x21: w32(c, rd(inst), c.r[rs(inst)][0] - c.r[rt(inst)][0]); break;
+            default: w32(c, rd(inst), c.r[rs(inst)][0]); break;
+            }
+            break;
+        }
+        default: fault("REGIMM unknown"); return true;
             }
             if (take) c.next_pc = c.pc + (sx16(imm(inst)) << 2);
             break;
@@ -293,7 +337,14 @@ bool run(Cpu& c, SyscallFn handler, u64 max_inst) {
                     j_count, c.pc, target, (unsigned long long)c.instret);
             c.next_pc = target; break;
         }
-        case 0x03: w32(c, 31, cur_pc + 8); c.next_pc = ((cur_pc + 4) & 0xF0000000) | tgt(inst); break; // jal: ra = P+8 (FIX: cur_pc, bukan c.pc)
+        case 0x03: {
+            u32 target = ((cur_pc + 4) & 0xF0000000) | tgt(inst);
+            static uint32_t jal_count = 0; if (jal_count++ < 15) {
+                std::fprintf(stderr, "[JAL KEY] pc=0x%08x -> 0x%08x instret=%llu\n",
+                    cur_pc, target, (unsigned long long)c.instret);
+            }
+            w32(c, 31, cur_pc + 8); c.next_pc = target; break;
+        }
         // ---------- BRANCH ----------
         case 0x04: {
             u32 target = c.pc + 4 + (sx16(imm(inst)) << 2);
@@ -372,6 +423,20 @@ bool run(Cpu& c, SyscallFn handler, u64 max_inst) {
             else { fault("COP0 rs unknown"); return true; }
             break;
         }
+        
+        case 0x1C: {  // SPECIAL2 (MMI)
+            u32 f = fn(inst) & 0x3F;
+            switch (f) {
+            case 0x28: w32(c, rd(inst), c.r[rs(inst)][0] + c.r[rt(inst)][0]); break; // padduw
+            case 0x29: w32(c, rd(inst), c.r[rs(inst)][0] - c.r[rt(inst)][0]); break; // psubuw
+            case 0x00: w32(c, rd(inst), c.r[rs(inst)][0]); break;
+            case 0x01: w32(c, rd(inst), c.r[rs(inst)][0]); break;
+            case 0x20: w32(c, rd(inst), c.r[rs(inst)][0] + c.r[rt(inst)][0]); break;
+            case 0x21: w32(c, rd(inst), c.r[rs(inst)][0] - c.r[rt(inst)][0]); break;
+            default: w32(c, rd(inst), c.r[rs(inst)][0]); break;
+            }
+            break;
+        }
         default:
             fault("opcode unknown");
             return true;
@@ -417,9 +482,20 @@ bool run(Cpu& c, SyscallFn handler, u64 max_inst) {
             fault("code_end");
             return true;
         }
-        // data area check: 0x3c0000-0x3d0000 = function table/data, bukan code
-        if (c.next_pc >= 0x003c0000 && c.next_pc < 0x003d0000) {
-            c.next_pc = c.pc + 8;  // skip data area
+        // trace: PC masuk data area
+        static bool in_data = false;
+        if (!in_data && c.next_pc >= 0x003c0000 && c.next_pc < 0x003d0000) {
+            in_data = true;
+            std::fprintf(stderr, "[DATA_ENTRY] pc=0x%08x next=0x%08x instret=%llu\n",
+                c.pc, c.next_pc, (unsigned long long)c.instret);
+        }
+        // .data section (0x003BBF80-0x0041B580) = executable di PS2 (WAX flag)
+        // .rodata/.bss = NOT executable
+        if (c.next_pc >= 0x0041B580 && c.next_pc < 0x00460E00) {
+            std::fprintf(stderr, "[RODATA_STOP] pc=0x%08x next=0x%08x instret=%llu\n",
+                c.pc, c.next_pc, (unsigned long long)c.instret);
+            fault("rodata");
+            return true;
         }
         if (c.pc >= 0x02000000 || c.next_pc >= 0x02000000) {
                 std::fprintf(stderr, "[CRASH] pc=0x%08x next=0x%08x instret=%llu\n",
