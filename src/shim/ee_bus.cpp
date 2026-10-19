@@ -12,6 +12,7 @@ namespace {
 std::vector<u8> g_ram;      // lazily allocated 32 MB
 u32 g_chcr = 0, g_madr = 0, g_qwc = 0, g_tadr = 0;
 u64 g_vif_polls = 0;      // VIF_STAT0 poll counter (sintesis bit 0x200)
+u64 g_gif_busy = 0;       // GIF_STAT busy countdown (set saat kick 0x1000F180)
 Stats g_stats;
 
 std::vector<u8>& ram() {
@@ -100,6 +101,11 @@ u32 mmio_read32(u32 addr) {
         g_vif_polls++;
         g_stats.vif_polls++;
         return (g_vif_polls >= 8) ? 0x200u : 0u;
+    // GIF_STAT (0x1000F130): bit 15 (0x8000) = busy; code @0x3b0d50 polls
+    // ANDI 0x8000 / BNE sampai CLEAR. Native: sibuk bbrp poll lalu clear
+    // (deterministik, pola sama spt VIF_STAT0 di atas). 2026-10-19.
+    case 0x1000F130:
+        return 0u;  // GIF_STAT: selalu ready
     default:
         g_stats.mmio_other++;
         return 0;
@@ -130,7 +136,10 @@ u32 read32(u32 addr) {
     return v;
 }
 void write8(u32 addr, u8 v) {
-    if (is_mmio(addr)) return;
+    if (is_mmio(addr)) {
+        if (addr == 0x1000F180) g_gif_busy = 6;  // kick GIF -> sibuk 6 poll
+        return;
+    }
     u32 off = addr & RAM_MASK;
     if (off < RAM_SIZE) ram()[off] = v;
 }

@@ -54,7 +54,12 @@ static bool sys_handler(u32 num, u32 a0, u32 a1, u32 a2, u32 a3, u32& v0) {
     case 100: v0 = eekern::FlushCache(a0); return true;                     // FlushCache
     case 108: case 109: case 110: case 111: v0 = 0; return true;            // CPU timer stubs
     case 112: case 113: case 114: v0 = 0; return true;                       // GS IMR/PGIF stubs
-    case 115: v0 = 0; return true;                                           // SetVSyncFlag (injected periodic naik)
+    case 115: {
+        // SetVSyncFlag: a1 = pointer flag (dugaan ABI). Tulis 1 = VSync terjadi,
+        // supaya game tidak nunggu selamanya. 2026-10-19.
+        if (a1 >= 0x100000 && a1 < 0x02000000) eebus::write32(a1, 1);
+        v0 = 0; return true;
+    }
     case 118: v0 = 0; return true;                                          // SifDmaStat: idle
     case 119: v0 = 1; return true;                                          // SifSetDma: done
     case 120: v0 = 0; return true;                                          // SifSetDChain
@@ -78,6 +83,7 @@ static bool sys_handler(u32 num, u32 a0, u32 a1, u32 a2, u32 a3, u32& v0) {
     case 125: v0 = 0; return true;                                          // PSMode
     case 84: v0 = 0; return true;                                           // ClearEventFlag
     case 85: case 86: case 87: case 88: v0 = 0; return true;                // TLB (native: no-op)
+    case 130: v0 = 0; return true;                                          // _InitTLB (flat RAM: no-op)
     case 90: case 91: v0 = 0; return true;                                  // ReferEventFlagStatus (old)
     case 80: case 81: case 82: case 83: v0 = 0; return true;                // EventFlag old variants
     case 89: v0 = 0; return true;
@@ -143,7 +149,7 @@ int main(int argc, char** argv) {
     Cpu cpu;
     // PC start post-clear: 0x100198 (blok SetupThread/SetupHeap — gate crt0 asli).
     cpu.reset(0x31db70);  // main wrapper game asli
-    cpu.set_sp(0x02000000);                    // boot stack atas
+    cpu.set_sp(0x01FFFF00);                    // boot stack: top RAM valid (0x02000000 & MASK = 0!)
     cpu.set_gp(0x0063fd48);                    // gp dari crt0: lui a0,0x47; addiu a0,-29456
     cpu.hist = g_hist;
     cpu.sample_mask = 0xFFFFu;                 // sampling tiap 65536 instr

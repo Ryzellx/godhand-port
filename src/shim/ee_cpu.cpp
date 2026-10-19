@@ -17,6 +17,7 @@ void Cpu::reset(u32 entry) {
     pc = entry;
     next_pc = entry + 4;
     sa = 0; facc = 0; fcsr = 0;
+    std::memset(cop0, 0, sizeof(cop0));
     std::memset(f, 0, sizeof(f));
     instret = 0;
     fault = nullptr;
@@ -135,6 +136,16 @@ static inline void fset(Cpu& c, u32 i, float v) { u32 b; std::memcpy(&b, &v, 4);
 bool run(Cpu& c, SyscallFn handler, u64 max_inst) {
     while (c.instret < max_inst) {
         u32 cur_pc = c.pc;
+        if (cur_pc == 0x003b1ce4) {
+            static int dbg_count = 0;
+            if (dbg_count++ < 3) {
+                u32 t0 = c.r[8][0];
+                u32 sp = c.r[29][0];
+                u32 fp = eebus::read32(sp + 0x44);
+                printf("[DEBUG] 0x3b1ce4: t0=0x%08x sp=0x%08x fp=0x%08x\n", t0, sp, fp);
+                fflush(stdout);
+            }
+        }
         u32 inst = eebus::read32(c.pc);
         c.pc = c.next_pc;             // delay slot semantics: slot sudah diprefetch
         c.next_pc = c.pc + 4;
@@ -163,7 +174,7 @@ bool run(Cpu& c, SyscallFn handler, u64 max_inst) {
             }
             case 0x09: {
                 u32 t = c.r[rs(inst)][0];
-                u32 ret = c.pc + 8;
+                u32 ret = cur_pc + 8;  // FIX 2026-10-19: c.pc sudah di delay slot
                 w32(c, rd(inst), ret);
                 if (t == 0 || t >= 0x02000000) {
                     // function pointer null/invalid — return ke caller
@@ -277,7 +288,7 @@ bool run(Cpu& c, SyscallFn handler, u64 max_inst) {
                     j_count, c.pc, target, (unsigned long long)c.instret);
             c.next_pc = target; break;
         }
-        case 0x03: w32(c, 31, c.pc + 8); c.next_pc = ((c.pc + 4) & 0xF0000000) | tgt(inst); break; // jal: ra = P+8 (return addr)
+        case 0x03: w32(c, 31, cur_pc + 8); c.next_pc = ((cur_pc + 4) & 0xF0000000) | tgt(inst); break; // jal: ra = P+8 (FIX: cur_pc, bukan c.pc)
         // ---------- BRANCH ----------
         case 0x04: {
             u32 target = c.pc + 4 + (sx16(imm(inst)) << 2);
@@ -349,6 +360,13 @@ bool run(Cpu& c, SyscallFn handler, u64 max_inst) {
             eebus::write32(a + 4, c.r[rt(inst)][1]);
             break;
         }
+        case 0x10: {  // COP0
+            u32 crs = rs(inst), crt = rt(inst), crd = rd(inst);
+            if (crs == 0) w32(c, crt, c.cop0[crd]);            // MFC0
+            else if (crs == 4) c.cop0[crd] = c.r[crt][0];      // MTC0
+            else { fault("COP0 rs unknown"); return true; }
+            break;
+        }
         default:
             fault("opcode unknown");
             return true;
@@ -377,7 +395,7 @@ bool run(Cpu& c, SyscallFn handler, u64 max_inst) {
             pc_ring[pc_ri++ & 15] = c.pc;
             // trace first entry into stack area
             static bool in_stack = false;
-            if (!in_stack && c.next_pc >= 0x003B3D00 && c.next_pc < 0x02000000 && c.instret > 100000) {
+            if (!in_stack && c.next_pc >= 0x003BBF20 && c.next_pc < 0x02000000 && c.instret > 100000) {
                 in_stack = true;
                 std::fprintf(stderr, "[CODE_END] pc=0x%08x next=0x%08x instret=%llu ra=0x%08x sp=0x%08x\n",
                     c.pc, c.next_pc, (unsigned long long)c.instret, c.r[31][0], c.r[29][0]);
@@ -387,8 +405,8 @@ bool run(Cpu& c, SyscallFn handler, u64 max_inst) {
                 for (int r = 1; r < 32; r++)
                     if (c.r[r][0]) std::fprintf(stderr, "  r%-2d=0x%08x\n", r, c.r[r][0]);
             }
-            // code bounds: .text ends at 0x003B3D00 (ELF section)
-        if (c.next_pc >= 0x003B3D00 && c.next_pc < 0x10000000) {
+            // code bounds: .text ends at 0x003BBF20 (ELF section hdr, verified 2026-10-19)
+        if (c.next_pc >= 0x003BBF20 && c.next_pc < 0x10000000) {
             std::fprintf(stderr, "[CODE_BOUNDS] pc=0x%08x next=0x%08x instret=%llu — STOP (past .text)\n",
                 c.pc, c.next_pc, (unsigned long long)c.instret);
             fault("code_end");

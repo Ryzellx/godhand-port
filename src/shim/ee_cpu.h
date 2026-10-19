@@ -29,6 +29,7 @@ struct Cpu {
     u32 f[32]{};             // FPR 32-bit single (EE FPU = single only)
     u32 facc = 0;            // FPU accumulator (ADDA/MULA/MADD.S family)
     u32 fcsr = 0;
+    u32 cop0[32]{};  // COP0: Status/Cause/EPC/Count/... (MFC0/MTC0)
     u64 instret = 0;         // instruksi dieksekusi (bukti)
     u32 fault_pc = 0, fault_op = 0;   // diagnosis crash (fault_pc = ALAMAT SETELAH
                                       // instruksi faulting — konvensi lama dipertahankan)
