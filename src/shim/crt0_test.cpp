@@ -219,6 +219,28 @@ int main(int argc, char** argv) {
                     samples ? 100.0 * hs[i].n / samples : 0.0);
     }
 
+    // census VU0 (Phase 7b.8): op macro, lqc2/sqc2, SPECIAL1/SPECIAL2 top-hits, unk
+    std::printf("VU0: macro=%llu lqc2=%llu sqc2=%llu unk=%llu\n",
+                (unsigned long long)cpu.vu_macro_hits,
+                (unsigned long long)cpu.vu_lqc2,
+                (unsigned long long)cpu.vu_sqc2,
+                (unsigned long long)cpu.vu_unk);
+    {   // SPECIAL1 top-8 (idx:count desc, idx asc) — bukti decode tabel dipakai game
+        struct VH { u64 n; u32 i; };
+        std::vector<VH> s1;
+        for (u32 i = 0; i < 64; i++) if (cpu.vu_spec1_hits[i]) s1.push_back({cpu.vu_spec1_hits[i], i});
+        std::sort(s1.begin(), s1.end(), [](const VH& a, const VH& b){ return a.n!=b.n ? a.n>b.n : a.i<b.i; });
+        std::printf("VU0 SPEC1 top:");
+        for (size_t i=0;i<s1.size()&&i<8;i++) std::printf(" %u:%llu", s1[i].i,(unsigned long long)s1[i].n);
+        std::printf(" | distinct=%zu\n", s1.size());
+        std::vector<VH> s2;
+        for (u32 i = 0; i < 128; i++) if (cpu.vu_spec2_hits[i]) s2.push_back({cpu.vu_spec2_hits[i], i});
+        std::sort(s2.begin(), s2.end(), [](const VH& a, const VH& b){ return a.n!=b.n ? a.n>b.n : a.i<b.i; });
+        std::printf("VU0 SPEC2 top:");
+        for (size_t i=0;i<s2.size()&&i<8;i++) std::printf(" %u:%llu", s2[i].i,(unsigned long long)s2[i].n);
+        std::printf(" | distinct=%zu\n", s2.size());
+    }
+
     // backward-taken-branch census top-8 (nol sampling -> hitungan eksak per alamat)
     struct B { u64 n; u32 b; };
     std::vector<B> bs;

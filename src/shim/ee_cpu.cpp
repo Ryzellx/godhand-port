@@ -6,6 +6,7 @@
 // pakai tabel byte-level MIPS LE klasik.
 #include "ee_cpu.h"
 #include <cstdio>
+#include <cmath>
 #include <cstring>
 
 namespace eecpu {
@@ -36,6 +37,11 @@ static inline u32 rt(u32 i)  { return (i >> 16) & 0x1F; }
 static inline u32 rd(u32 i)  { return (i >> 11) & 0x1F; }
 static inline u32 sa_f(u32 i){ return (i >> 6) & 0x1F; }
 static inline u32 fn(u32 i)  { return i & 0x3F; }
+// VU0 micro operand fields (MIPS pos): fd=dest (inst[10:6]=sa), fs=src1 (inst[15:11]=rd),
+// ft=src2 (inst[20:16]=rt). Dipakai decode COP2 SPECIAL1/SPECIAL2.
+static inline u32 fd(u32 i)  { return (i >> 6) & 0x1F; }
+static inline u32 fs(u32 i)  { return (i >> 11) & 0x1F; }
+static inline u32 ft(u32 i)  { return (i >> 16) & 0x1F; }
 static inline u32 imm(u32 i) { return i & 0xFFFF; }
 static inline u32 tgt(u32 i) { return (i & 0x3FFFFFF) << 2; }
 
@@ -278,57 +284,183 @@ bool run(Cpu& c, SyscallFn handler, u64 max_inst) {
             break;
         }
         // ---------- VU0 (COP2) — LQC2/SQC2 ----------
-        case 0x36: {  // LQC2 — Load Quadword COP2 (VU0)
-            u32 a = c.r[rs(inst)][0] + sx16(imm(inst));
+        case 0x36: {  // LQC2 — Load Quadword COP2 (VU0) — addr 16-aligned (verified PCSX2)
+            u32 a = (c.r[rs(inst)][0] + sx16(imm(inst))) & ~0xFu;
             u32 vf = rt(inst);
             for (int i = 0; i < 4; i++) c.vf[vf][i] = eebus::read32(a + i * 4);
+            c.vu_lqc2++;
             break;
         }
-        case 0x3E: {  // SQC2 — Store Quadword COP2 (VU0)
-            u32 a = c.r[rs(inst)][0] + sx16(imm(inst));
+        case 0x3E: {  // SQC2 — Store Quadword COP2 (VU0) — addr 16-aligned
+            u32 a = (c.r[rs(inst)][0] + sx16(imm(inst))) & ~0xFu;
             u32 vf = rt(inst);
             for (int i = 0; i < 4; i++) eebus::write32(a + i * 4, c.vf[vf][i]);
+            c.vu_sqc2++;
             break;
         }
-        case 0x12: {  // COP2 — VU0 microinstructions
-            // encoding: op(6) rs(5) ft(5) fs(5) fd(5) fn(6)
-            // vmove: fn=0x3C, vmr32: fn=0x3D
-            u32 ft = rt(inst);  // destination vector reg
-            u32 fs = rd(inst);  // source vector reg (in MIPS encoding)
-            u32 fd = (inst >> 6) & 0x1F;  // another reg
-            u32 fn = inst & 0x3F;
-            switch (fn) {
-            case 0x3C:  // vmove.xyzw vd, vs
-                for (int i = 0; i < 4; i++) c.vf[ft][i] = c.vf[fs][i];
-                break;
-            case 0x3D:  // vmr32.xyzw vd, vs (rotate right 32 bits = shift components)
-                c.vf[ft][0] = c.vf[fs][1];
-                c.vf[ft][1] = c.vf[fs][2];
-                c.vf[ft][2] = c.vf[fs][3];
-                c.vf[ft][3] = c.vf[fs][0];
-                break;
-            case 0x2C:  // vadd.xyzw
-                for (int i = 0; i < 4; i++) {
-                    float a, b;
-                    memcpy(&a, &c.vf[fs][i], 4);
-                    memcpy(&b, &c.vf[fd][i], 4);
-                    float r = a + b;
-                    memcpy(&c.vf[ft][i], &r, 4);
+        case 0x12: {  // COP2 — VU0 micro/macro (decode tabel — Phase 7b.8)
+            // Field (MIPS pos, verified PCSX2 microVU): fd=dest (inst[10:6]),
+            // fs=src1 (inst[15:11]), ft=src2/bcast (inst[20:16]), func6=inst[5:0].
+            // Dispatch: rs(inst)>=0x10 -> micro. func6 0x00-0x3B = SPECIAL1 (64 tbl);
+            // func6 0x3C-0x3F = SPECIAL2 (idx2 = (inst&3)|((inst>>4)&0x7C), 128 tbl).
+            u32 rsf = rs(inst);
+            auto vfl = [&](u32 reg, int lane) -> float {   // baca VF (VF0 = 0 di hw)
+                if (reg == 0) return 0.f;
+                float v; std::memcpy(&v, &c.vf[reg][lane & 3], 4); return v;
+            };
+            auto vfs = [&](u32 reg, int lane, float v) {   // tulis VF (VF0 no-op)
+                if (reg == 0) return;
+                std::memcpy(&c.vf[reg][lane & 3], &v, 4);
+            };
+            auto accget = [&](int lane) -> float { float v; std::memcpy(&v, &c.vacc[lane & 3], 4); return v; };
+            auto accset = [&](int lane, float v) { std::memcpy(&c.vacc[lane & 3], &v, 4); };
+            auto vfl_bits = [&](u32 reg, int lane) -> u32 { return reg == 0 ? 0u : c.vf[reg][lane & 3]; };
+            auto vfs_bits = [&](u32 reg, int lane, u32 b) { if (reg) c.vf[reg][lane & 3] = b; };
+            auto vig = [&](u32 reg) -> u32 { return reg == 0 ? 0u : c.vi[reg]; };
+            auto vis = [&](u32 reg, u32 v) { if (reg) c.vi[reg] = v; };
+            // I register = vi[fd] dipakai broadcast utk varian ".i"; Q utk ".q".
+            auto bcast_ft = [&](u32 ft, u32 fs_, int comp) -> float { return vfl(ft, comp); };
+            // sinkron I-reg snapshot dari vi[fd] utk varian .i (I = vi[fd] dlm VU)
+            c.v_i_reg = (float)(s32)vig(fd(inst));
+
+            if (rsf < 0x10) {
+                // macro moves: QMFC2/CFC2/MTC2/CTC2/BC2
+                if (rsf == 0x01) { w32(c, rt(inst), c.vf[rd(inst)][0]); }        // QMFC2 (low32)
+                else if (rsf == 0x02) { w32(c, rt(inst), c.vcctl[rd(inst) & 15]); } // CFC2
+                else if (rsf == 0x04) { for (int i=0;i<4;i++) c.vf[rd(inst)][i]=0;  // MTC2 (write low32, upper cleared)
+                    std::memcpy(&c.vf[rd(inst)][0], &c.r[rt(inst)][0], 4); }
+                else if (rsf == 0x05) { for (int i=0;i<4;i++) c.vf[rd(inst)][i]=c.r[rt(inst)][i]; } // QMTC2 (128b)
+                else if (rsf == 0x06) { c.vcctl[rd(inst) & 15] = c.r[rt(inst)][0]; } // CTC2
+                else if (rsf == 0x08) { // BC2F/BC2T (cond flag di vcctl[1])
+                    u32 tf = rt(inst); bool flag = c.vcctl[1] != 0; bool take = (tf == 1) ? flag : !flag;
+                    if (take) c.next_pc = c.pc + (sx16(imm(inst)) << 2);
+                    else { c.pc += 4; c.next_pc = c.pc + 4; } // likely-ish skip
                 }
+                c.vu_macro_hits++;
                 break;
-            case 0x2D:  // vsub.xyzw
-                for (int i = 0; i < 4; i++) {
-                    float a, b;
-                    memcpy(&a, &c.vf[fs][i], 4);
-                    memcpy(&b, &c.vf[fd][i], 4);
-                    float r = a - b;
-                    memcpy(&c.vf[ft][i], &r, 4);
+            }
+
+            u32 fd_ = fd(inst), fs_ = fs(inst), ft_ = ft(inst);
+            u32 func6 = inst & 0x3F;
+            c.vu_macro_hits++;
+
+            if (func6 < 0x3C) {  // ---- SPECIAL1 (64-entry table) ----
+                c.vu_spec1_hits[func6]++;
+                u32 comp = func6 & 3;              // x/y/z/w selector utk varian broadcast
+                bool bc = (func6 < 0x28);          // varian x/y/z/w + q/i pakai broadcast
+                // Kelompok fungsi utk 4-varian (x,y,z,w) di 0x00-0x1B:
+                switch (func6 >> 2) {
+                case 0x00: for (int l=0;l<4;l++){ float b = bc? bcast_ft(ft_,fs_,comp):vfl(ft_,l); vfs(fd_,l, vfl(fs_,l)+b);} break; // VADDx
+                case 0x01: for (int l=0;l<4;l++){ float b = bc? bcast_ft(ft_,fs_,comp):vfl(ft_,l); vfs(fd_,l, vfl(fs_,l)-b);} break; // VSUBx
+                case 0x02: for (int l=0;l<4;l++){ float b = bc? bcast_ft(ft_,fs_,comp):vfl(ft_,l); float t=vfl(fs_,l)*b; accset(l, accget(l)+t); vfs(fd_,l, accget(l));} break; // VMADDx
+                case 0x03: for (int l=0;l<4;l++){ float b = bc? bcast_ft(ft_,fs_,comp):vfl(ft_,l); float t=vfl(fs_,l)*b; accset(l, accget(l)-t); vfs(fd_,l, accget(l));} break; // VMSUBx
+                case 0x04: for (int l=0;l<4;l++){ float b = bc? bcast_ft(ft_,fs_,comp):vfl(ft_,l); vfs(fd_,l, std::fmax(vfl(fs_,l),b));} break; // VMAXx
+                case 0x05: for (int l=0;l<4;l++){ float b = bc? bcast_ft(ft_,fs_,comp):vfl(ft_,l); vfs(fd_,l, std::fmin(vfl(fs_,l),b));} break; // VMINIx
+                case 0x06: for (int l=0;l<4;l++){ float b = bc? bcast_ft(ft_,fs_,comp):vfl(ft_,l); float t=vfl(fs_,l)*b; accset(l,t); vfs(fd_,l,t);} break; // VMULx
+                default: break;
                 }
-                break;
-            default:
-                // generic: copy source to dest (best-effort)
-                for (int i = 0; i < 4; i++) c.vf[ft][i] = c.vf[fs][i];
-                break;
+                // Spesial 0x1C-0x2F (non 4-varian)
+                if (func6 == 0x1C) { for (int l=0;l<4;l++){ float t=vfl(fs_,l)*c.vq; accset(l,t); vfs(fd_,l,t);} }        // VMULq
+                else if (func6 == 0x1D) { for (int l=0;l<4;l++) vfs(fd_,l, std::fmax(vfl(fs_,l), c.v_i_reg)); }          // VMAXi
+                else if (func6 == 0x1E) { for (int l=0;l<4;l++){ float t=vfl(fs_,l)*c.v_i_reg; accset(l,t); vfs(fd_,l,t);} } // VMULi
+                else if (func6 == 0x1F) { for (int l=0;l<4;l++) vfs(fd_,l, std::fmin(vfl(fs_,l), c.v_i_reg)); }          // VMINIi
+                else if (func6 == 0x20) { for (int l=0;l<4;l++) vfs(fd_,l, vfl(fs_,l)+c.vq); }                            // VADDq
+                else if (func6 == 0x21) { for (int l=0;l<4;l++){ float t=vfl(fs_,l)*c.vq; accset(l,accget(l)+t); vfs(fd_,l,accget(l));} } // VMADDq
+                else if (func6 == 0x22) { for (int l=0;l<4;l++) vfs(fd_,l, vfl(fs_,l)+c.v_i_reg); }                       // VADDi
+                else if (func6 == 0x23) { for (int l=0;l<4;l++){ float t=vfl(fs_,l)*c.v_i_reg; accset(l,accget(l)+t); vfs(fd_,l,accget(l));} } // VMADDi
+                else if (func6 == 0x24) { for (int l=0;l<4;l++) vfs(fd_,l, vfl(fs_,l)-c.vq); }                            // VSUBq
+                else if (func6 == 0x25) { for (int l=0;l<4;l++){ float t=vfl(fs_,l)*c.vq; accset(l,accget(l)-t); vfs(fd_,l,accget(l));} } // VMSUBq
+                else if (func6 == 0x26) { for (int l=0;l<4;l++) vfs(fd_,l, vfl(fs_,l)-c.v_i_reg); }                       // VSUBi
+                else if (func6 == 0x27) { for (int l=0;l<4;l++){ float t=vfl(fs_,l)*c.v_i_reg; accset(l,accget(l)-t); vfs(fd_,l,accget(l));} } // VMSUBi
+                else if (func6 == 0x28) { for (int l=0;l<4;l++) vfs(fd_,l, vfl(fs_,l)+vfl(ft_,l)); }                       // VADD
+                else if (func6 == 0x29) { for (int l=0;l<4;l++){ float t=vfl(fs_,l)*vfl(ft_,l); accset(l,accget(l)+t); vfs(fd_,l,accget(l));} } // VMADD
+                else if (func6 == 0x2A) { for (int l=0;l<4;l++){ float t=vfl(fs_,l)*vfl(ft_,l); accset(l,t); vfs(fd_,l,t);} } // VMUL
+                else if (func6 == 0x2B) { for (int l=0;l<4;l++) vfs(fd_,l, std::fmax(vfl(fs_,l),vfl(ft_,l))); }           // VMAX
+                else if (func6 == 0x2C) { for (int l=0;l<4;l++) vfs(fd_,l, vfl(fs_,l)-vfl(ft_,l)); }                      // VSUB
+                else if (func6 == 0x2D) { for (int l=0;l<4;l++){ float t=vfl(fs_,l)*vfl(ft_,l); accset(l,accget(l)-t); vfs(fd_,l,accget(l));} } // VMSUB
+                else if (func6 == 0x2E) { // VOPMSUB (outer-product sub; pakai pola ACC lane)
+                    float ax=vfl(fs_,1)*vfl(ft_,2)-vfl(fs_,2)*vfl(ft_,1);
+                    float ay=vfl(fs_,2)*vfl(ft_,0)-vfl(fs_,0)*vfl(ft_,2);
+                    float az=vfl(fs_,0)*vfl(ft_,1)-vfl(fs_,1)*vfl(ft_,0);
+                    accset(0,accget(0)-ax); accset(1,accget(1)-ay); accset(2,accget(2)-az);
+                    vfs(fd_,0,accget(0)); vfs(fd_,1,accget(1)); vfs(fd_,2,accget(2)); vfs(fd_,3,accget(3));
+                }
+                else if (func6 == 0x2F) { for (int l=0;l<4;l++) vfs(fd_,l, std::fmin(vfl(fs_,l),vfl(ft_,l))); }          // VMINI
+                else if (func6 == 0x30) { vis(fd_, vig(fs_) + vig(ft_)); }                                                // VIADD
+                else if (func6 == 0x31) { vis(fd_, vig(fs_) - vig(ft_)); }                                                // VISUB
+                else if (func6 == 0x32) { vis(fd_, vig(fs_) + (fd(inst) /*imm5 dlm fd pos*/ & 0x1F)); }                    // VIADDI
+                else if (func6 == 0x34) { vis(fd_, vig(fs_) & vig(ft_)); }                                                // VIAND
+                else if (func6 == 0x35) { vis(fd_, vig(fs_) | vig(ft_)); }                                                // VIOR
+                else if (func6 == 0x38 || func6 == 0x39) { /* VCALLMS/VCALLMSR — microprogram call; census saja */ }
+                // func6 0x3C-0x3F tidak masuk sini
+            } else {
+                // ---- SPECIAL2 (128-entry table) ----
+                u32 idx2 = (inst & 3) | ((inst >> 4) & 0x7C);
+                c.vu_spec2_hits[idx2]++;
+                switch (idx2) {
+                case 0x00: case 0x01: case 0x02: case 0x03: // VADDAx: ACC = fs + bcast(ft,comp)
+                    for (int l=0;l<4;l++) accset(l, vfl(fs_,l)+vfl(ft_,idx2&3)); break;
+                case 0x04: case 0x05: case 0x06: case 0x07: // VSUBAx
+                    for (int l=0;l<4;l++) accset(l, vfl(fs_,l)-vfl(ft_,idx2&3)); break;
+                case 0x08: case 0x09: case 0x0A: case 0x0B: // VMADDAx: ACC += fs*bcast
+                    for (int l=0;l<4;l++) accset(l, accget(l)+vfl(fs_,l)*vfl(ft_,idx2&3)); break;
+                case 0x0C: case 0x0D: case 0x0E: case 0x0F: // VMSUBAx
+                    for (int l=0;l<4;l++) accset(l, accget(l)-vfl(fs_,l)*vfl(ft_,idx2&3)); break;
+                case 0x10: case 0x11: case 0x12: case 0x13: { // VITOF0/4/12/15
+                    static const int sh[4]={0,4,12,15}; int s=sh[idx2&3];
+                    for (int l=0;l<4;l++) vfs(fd_,l, (float)((s32)vfl_bits(fs_,l) >> 0) / (float)(1<<s));
+                    break; }
+                case 0x14: case 0x15: case 0x16: case 0x17: { // VFTOI0/4/12/15
+                    static const int sh[4]={0,4,12,15}; int s=sh[idx2&3];
+                    for (int l=0;l<4;l++){ s32 q=(s32)(vfl(fs_,l)*(float)(1<<s)); u32 b=(u32)q; vfs_bits(fd_,l,b);} break; }
+                case 0x18: case 0x19: case 0x1A: case 0x1B: // VMULAx
+                    for (int l=0;l<4;l++){ float t=vfl(fs_,l)*vfl(ft_,idx2&3); accset(l,t);} break;
+                case 0x1C: for (int l=0;l<4;l++){ float t=vfl(fs_,l)*c.vq; accset(l,t);} break;   // VMULAq
+                case 0x1D: for (int l=0;l<4;l++) vfs(fd_,l, std::fabs(vfl(fs_,l))); break;        // VABS
+                case 0x1E: for (int l=0;l<4;l++){ float t=vfl(fs_,l)*c.v_i_reg; accset(l,t);} break; // VMULAi
+                case 0x1F: break;                                                                   // VCLIP (flag; census)
+                case 0x20: for (int l=0;l<4;l++) accset(l, vfl(fs_,l)+c.vq); break;                // VADDAq
+                case 0x21: for (int l=0;l<4;l++){ float t=vfl(fs_,l)*c.vq; accset(l,accget(l)+t);} break; // VMADDAq
+                case 0x22: for (int l=0;l<4;l++) accset(l, vfl(fs_,l)+c.v_i_reg); break;           // VADDAi
+                case 0x23: for (int l=0;l<4;l++){ float t=vfl(fs_,l)*c.v_i_reg; accset(l,accget(l)+t);} break; // VMADDAi
+                case 0x24: for (int l=0;l<4;l++) accset(l, vfl(fs_,l)-c.vq); break;                // VSUBAq
+                case 0x25: for (int l=0;l<4;l++){ float t=vfl(fs_,l)*c.vq; accset(l,accget(l)-t);} break; // VMSUBAq
+                case 0x26: for (int l=0;l<4;l++) accset(l, vfl(fs_,l)-c.v_i_reg); break;           // VSUBAi
+                case 0x27: for (int l=0;l<4;l++){ float t=vfl(fs_,l)*c.v_i_reg; accset(l,accget(l)-t);} break; // VMSUBAi
+                case 0x28: for (int l=0;l<4;l++) accset(l, vfl(fs_,l)+vfl(ft_,l)); break;           // VADDA
+                case 0x29: for (int l=0;l<4;l++){ float t=vfl(fs_,l)*vfl(ft_,l); accset(l,accget(l)+t);} break; // VMADDA
+                case 0x2A: for (int l=0;l<4;l++){ float t=vfl(fs_,l)*vfl(ft_,l); accset(l,t);} break; // VMULA
+                case 0x2C: for (int l=0;l<4;l++) accset(l, vfl(fs_,l)-vfl(ft_,l)); break;           // VSUBA
+                case 0x2D: for (int l=0;l<4;l++){ float t=vfl(fs_,l)*vfl(ft_,l); accset(l,accget(l)-t);} break; // VMSUBA
+                case 0x2E: { // VOPMULA (outer product set ACC)
+                    accset(0, vfl(fs_,1)*vfl(ft_,2)); accset(1, vfl(fs_,2)*vfl(ft_,0)); accset(2, vfl(fs_,0)*vfl(ft_,1));
+                    break; }
+                case 0x2F: break;                                                                   // VNOP
+                case 0x30: for (int l=0;l<4;l++) vfs(fd_,l, vfl(fs_,l)); break;                     // VMOVE
+                case 0x31: { // VMR32: rotate components right (x<-w,y<-x,z<-y,w<-z)
+                    float x=vfl(fs_,3), y=vfl(fs_,0), z=vfl(fs_,1), w=vfl(fs_,2);
+                    vfs(fd_,0,x); vfs(fd_,1,y); vfs(fd_,2,z); vfs(fd_,3,w); break; }
+                case 0x34: { // VLQI: load quad indexed, base vi[fs], +I disp; inc vi[fs] by 16
+                    u32 addr = vig(fs_) + (u32)(s32)c.v_i_reg; addr &= ~0xFu;
+                    for (int l=0;l<4;l++) vfs(fd_,l, /*bits*/ (float)0); // placeholder replaced below
+                    // proper: copy raw bits
+                    for (int l=0;l<4;l++){ u32 b=eebus::read32(addr+l*4); vfs_bits(fd_,l,b); }
+                    vis(fs_, vig(fs_) + 16); break; }
+                case 0x35: { // VSQI: store quad indexed, inc vi[fs]
+                    u32 addr = vig(fs_) + (u32)(s32)c.v_i_reg; addr &= ~0xFu;
+                    for (int l=0;l<4;l++) eebus::write32(addr+l*4, c.vf[fs_][l]);
+                    vis(fs_, vig(fs_) + 16); break; }
+                case 0x38: c.vq = vfl(fs_,0) / vfl(ft_,0); break;                                    // VDIV (Q)
+                case 0x39: c.vq = std::sqrt(std::fabs(vfl(fs_,0))); break;                            // VSQRT
+                case 0x3A: c.vq = vfl(fs_,0) / std::sqrt(std::fabs(vfl(ft_,0))); break;               // VRSQRT
+                case 0x3B: break;                                                                   // VWAITQ (nop)
+                case 0x3C: vis(ft_, (u32)(s32)vfl(fs_,0)); break;                                    // VMTIR (vi[ft]=fs.x int)
+                case 0x3D: for (int l=0;l<4;l++) vfs(fd_,l, (float)(s32)vig(fs_)); break;            // VMFIR (vf=vi int->flt)
+                case 0x3E: vis(fd_, c.vf[fs_][0]); break;                                            // VILWR (vi[fd]=fs.x bits)
+                case 0x3F: c.vf[fs_][0] = vig(fd_); break;                                           // VISWR (fs.x=vi[fd])
+                case 0x40: case 0x41: case 0x42: case 0x43: break;                                   // VR* (R-reg; census)
+                default: c.vu_unk++; break;                                                          // belum diimplement
+                }
             }
             break;
         }

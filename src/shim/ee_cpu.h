@@ -35,8 +35,16 @@ struct Cpu {
     u32 vf[32][4]{};         // vector registers (LE: [0]=bits0..31)
     u32 vacc[4]{};           // MAC accumulator 128-bit (untuk MULA/MSUB family)
     u32 vcctl[16]{};         // control regs: 0=status 1=macflag 2=clipflag 3=R 4=I
+    // --- VU0 register file penuh (7b.8) — decode SPECIAL1/SPECIAL2 9-bit ---
+    u32 vi[32]{};            // VI0..VI31 integer regs (VI0 = 0 on read)
+    float vq = 0.f;          // Q register (DIV/SQRT result, broadcast src)
+    float v_i_reg = 0.f;     // I register snapshot (diisi dari vi[fd] per op Vxxi)
+    u32 vtop = 0;            // TOP register (VLQD/VSQD decrement mode)
     u64 vu_macro_hits = 0;   // census: instruksi VU0 macro dieksekusi
     u64 vu_lqc2 = 0, vu_sqc2 = 0;  // census load/store VF
+    u64 vu_spec1_hits[64]{};        // census per SPECIAL1 func (idx = func&0x3F)
+    u64 vu_spec2_hits[128]{};       // census per SPECIAL2 (idx = (i&3)|((i>>4)&0x7C))
+    u64 vu_unk = 0;                 // census instruksi VU0 tak dikenal
     u32 cop0[32]{};  // COP0: Status/Cause/EPC/Count/... (MFC0/MTC0)
     u64 instret = 0;         // instruksi dieksekusi (bukti)
     u32 fault_pc = 0, fault_op = 0;   // diagnosis crash (fault_pc = ALAMAT SETELAH
