@@ -35,6 +35,7 @@ add_executable(game_loop_test
   src/shim/ee_cpu.cpp
   src/shim/ee_bus.cpp
   src/shim/ee_kernel.cpp
+  src/shim/host_io.cpp
   src/gif/gif.cpp
   src/gs/gs_state.cpp
   src/vk/vk_backend.cpp)
@@ -44,7 +45,8 @@ target_link_libraries(game_loop_test PRIVATE Vulkan::Vulkan)
 # 3) M5 shim kernel EE (thread/sema/eventflag/file/gif-hook) — portable std::thread
 add_executable(shim_test
   src/shim/shim_test.cpp
-  src/shim/ee_kernel.cpp)
+  src/shim/ee_kernel.cpp
+  src/shim/host_io.cpp)
 target_include_directories(shim_test PRIVATE src/shim)
 find_package(Threads REQUIRED)
 target_link_libraries(shim_test PRIVATE Threads::Threads)
@@ -54,6 +56,7 @@ add_executable(bus_test
   src/shim/bus_test.cpp
   src/shim/ee_bus.cpp
   src/shim/ee_kernel.cpp
+  src/shim/host_io.cpp
   src/gif/gif.cpp
   src/gs/gs_state.cpp)
 target_include_directories(bus_test PRIVATE src/shim src/gif src/gs)
@@ -64,7 +67,8 @@ add_executable(crt0_test
   src/shim/crt0_test.cpp
   src/shim/ee_cpu.cpp
   src/shim/ee_bus.cpp
-  src/shim/ee_kernel.cpp)
+  src/shim/ee_kernel.cpp
+  src/shim/host_io.cpp)
 target_include_directories(crt0_test PRIVATE src/shim)
 find_package(Threads REQUIRED)
 target_link_libraries(crt0_test PRIVATE Threads::Threads)
@@ -74,7 +78,8 @@ add_executable(branch_test
   src/shim/branch_probe.cpp
   src/shim/ee_cpu.cpp
   src/shim/ee_bus.cpp
-  src/shim/ee_kernel.cpp)
+  src/shim/ee_kernel.cpp
+  src/shim/host_io.cpp)
 target_include_directories(branch_test PRIVATE src/shim)
 target_link_libraries(branch_test PRIVATE Threads::Threads)
 
@@ -114,3 +119,10 @@ add_executable(game_demo
   src/vk/vk_backend.cpp)
 target_include_directories(game_demo PRIVATE src/vk)
 target_link_libraries(game_demo PRIVATE Vulkan::Vulkan)
+
+# Phase 8 — host filesystem + SIF RPC backend (ganti IOP)
+add_executable(sif_test
+  src/shim/sif_test.cpp
+  src/shim/sif_rpc.cpp
+  src/shim/host_io.cpp)
+target_include_directories(sif_test PRIVATE src/shim)

@@ -91,13 +91,35 @@ static bool sys_handler(u32 num, u32 a0, u32 a1, u32 a2, u32 a3, u32& v0) {
         // Native model: IOP-side selesai instan. Sifcmd EE men-set flag[0]
         // (0x77E6C0) via INTC SIF0-completion pada HW asli; di sini kita tulis
         // langsung waktu kick supaya poll 0x3b2a58 (idx0) keluar.
+        static int dma_log = 0;
+        if (dma_log++ < 6) {
+            // sdd[] = { void* src; void* dest; int size; int attr; }
+            std::fprintf(stderr, "[sifdma] #%d a0=0x%08x a1=%u\n", dma_log, a0, a1);
+            for (int i = 0; i < 3; ++i) {
+                u32 src = eebus::read32(a0 + i * 16 + 0);
+                u32 dst = eebus::read32(a0 + i * 16 + 4);
+                u32 sz  = eebus::read32(a0 + i * 16 + 8);
+                u32 at  = eebus::read32(a0 + i * 16 + 12);
+                std::fprintf(stderr, "   [%d] src=0x%08x dst=0x%08x size=0x%x attr=0x%x", i, src, dst, sz, at);
+                if (src && sz && sz < 256) {
+                    std::fprintf(stderr, " data=");
+                    for (u32 b = 0; b < sz && b < 32; ++b) std::fprintf(stderr, "%02x", eebus::read8(src + b));
+                }
+                std::fprintf(stderr, "\n");
+            }
+        }
         eebus::write32(0x0077E6C0u, eebus::read32(0x0077E6C0u) | 1u);
         v0 = 1; return true;
     }
     case 120: v0 = 0; return true;                                          // SifSetDChain
     case 121: v0 = eekern::SifSetReg(a0, a1); return true;              // SifSetReg(reg, val)
     case 122: v0 = eekern::SifGetReg(a0); return true;                  // SifGetReg(reg) — poll reg4&0x20000
-    case 124: v0 = 0; return true;                                          // Deci2Call
+    case 124: {                                                             // (RPC init/check)
+        static int rpc_log = 0;
+        if (rpc_log++ < 6)
+            std::fprintf(stderr, "[sys124] #%d a0=0x%08x a1=0x%08x a2=0x%08x\n", rpc_log, a0, a1, a2);
+        v0 = 1; return true;   // EXPERIMENT: treat as success (was 0 -> retry loop)
+    }
     case 127: v0 = 32 * 1024 * 1024; return true;                           // GetMemorySize 32MB
     case 131: { // FindAddress — SEMANTIK ASLI dari implementasi game sendiri @VMA0x3b64a8:
                 // scan u32 [a0..a1) cari kata pertama == *(u32*)a2; kembalikan alamat

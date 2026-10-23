@@ -1,5 +1,7 @@
 // ee_kernel.h — implementasi portable (std::thread; jalan di Linux & mingw/Win)
 #include "ee_kernel.h"
+#include "host_io.h"
+#include <filesystem>
 
 #include <atomic>
 #include <chrono>
@@ -96,6 +98,8 @@ void msleep(s32 usec) {
 }
 
 // cdrom0:\A\B;1 -> <root>/A/B (toleransi ;1 trailing & slash campur)
+// Phase 8: fallback case-insensitive + traversal guard via hostio::resolve
+// (ISO PS2 menyimpan nama uppercase; host bisa lowercase atau beda ekstensi).
 std::string map_path(const char* raw, const std::string& root) {
     std::string p(raw ? raw : "");
     for (auto& c : p)
@@ -109,7 +113,13 @@ std::string map_path(const char* raw, const std::string& root) {
         return g_host_root + PATHSEP + p;
     }
     while (!p.empty() && (p[0] == PATHSEP || p[0] == '/')) p.erase(0, 1);
-    return root + PATHSEP + p;
+    std::string direct = root + PATHSEP + p;
+    if (!std::filesystem::exists(direct)) {
+        if (hostio::root() != root) hostio::init(root);
+        std::string resolved;
+        if (hostio::resolve(raw, resolved)) return resolved;
+    }
+    return direct;
 }
 
 } // namespace
