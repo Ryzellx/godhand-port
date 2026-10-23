@@ -1,5 +1,7 @@
 // ee_kernel.h — implementasi portable (std::thread; jalan di Linux & mingw/Win)
 #include "ee_kernel.h"
+#include <cstdlib>
+#include <cstdio>
 #include "host_io.h"
 #include <filesystem>
 
@@ -451,7 +453,13 @@ void sif_regs_reset() {
     g_sif_reg[4] = 0x00020000u;
 }
 u32 SifSetReg(u32 reg, u32 val) {
-    if (reg < SIF_REG_N) { g_sif_reg[reg] = val; g_sif_set_n[reg]++; return 1; }
+    static int logn = 0;
+    if (std::getenv("GH_SIF_REGLOG") && logn++ < 16)
+        std::fprintf(stderr, "[sifreg] set[%u]=0x%08x\n", reg, val);
+    // Semantik bit-set (bukan overwrite): SifSetReg menandai bit status. Terukur dari
+    // urutan game: set[4]=0x60000 -> 0x40000 -> 0x10000 -> 0x20000, lalu poll
+    // `and 0x40000` (0x3b6250). Dengan overwrite, bit 0x40000 hilang -> spin 93 M call.
+    if (reg < SIF_REG_N) { g_sif_reg[reg] |= val; g_sif_set_n[reg]++; return 1; }
     g_sif_set_oob++; g_sif_set_oob_last = reg; return 1;
 }
 u32 SifGetReg(u32 reg) {

@@ -657,6 +657,7 @@ bool run(Cpu& c, SyscallFn handler, u64 max_inst) {
                      eebus::write32(a, c.f[r]); eebus::write32(a + 4, c.f[(r + 1) & 31]); break; }
         case 0x2C: do_sdl(c.r[rs(inst)][0] + sx16(imm(inst)), g64(c, rt(inst))); break;  // sdl (FIX: op=0x2C bukan 0x2A)
         case 0x2D: do_sdr(c.r[rs(inst)][0] + sx16(imm(inst)), g64(c, rt(inst))); break;  // sdr
+        case 0x2A: do_swl(c.r[rs(inst)][0] + sx16(imm(inst)), c.r[rt(inst)][0]); break;  // swl
         case 0x2E: do_swr(c.r[rs(inst)][0] + sx16(imm(inst)), c.r[rt(inst)][0]); break;  // swr
         case 0x2F: break;   // CACHE — native: tak ada cache koheren perlu disentuh
         case 0x33: break;   // PREF — prefetch: no-op native

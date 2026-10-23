@@ -6,6 +6,9 @@
 #include "ee_cpu.h"
 #include "ee_bus.h"
 #include "ee_kernel.h"
+#include "sif_rpc.h"
+#include "sif_dma.h"
+#include "memcard.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -86,39 +89,30 @@ static bool sys_handler(u32 num, u32 a0, u32 a1, u32 a2, u32 a3, u32& v0) {
         if (a1 >= 0x100000 && a1 < 0x02000000) eebus::write32(a1, 1);
         v0 = 0; return true;
     }
-    case 118: v0 = 0; return true;                                          // SifDmaStat: idle
-    case 119: {                                                              // SifSetDma: kick DMA EE<->IOP
-        // Native model: IOP-side selesai instan. Sifcmd EE men-set flag[0]
-        // (0x77E6C0) via INTC SIF0-completion pada HW asli; di sini kita tulis
-        // langsung waktu kick supaya poll 0x3b2a58 (idx0) keluar.
-        static int dma_log = 0;
-        if (dma_log++ < 6) {
-            // sdd[] = { void* src; void* dest; int size; int attr; }
-            std::fprintf(stderr, "[sifdma] #%d a0=0x%08x a1=%u\n", dma_log, a0, a1);
-            for (int i = 0; i < 3; ++i) {
-                u32 src = eebus::read32(a0 + i * 16 + 0);
-                u32 dst = eebus::read32(a0 + i * 16 + 4);
-                u32 sz  = eebus::read32(a0 + i * 16 + 8);
-                u32 at  = eebus::read32(a0 + i * 16 + 12);
-                std::fprintf(stderr, "   [%d] src=0x%08x dst=0x%08x size=0x%x attr=0x%x", i, src, dst, sz, at);
-                if (src && sz && sz < 256) {
-                    std::fprintf(stderr, " data=");
-                    for (u32 b = 0; b < sz && b < 32; ++b) std::fprintf(stderr, "%02x", eebus::read8(src + b));
-                }
-                std::fprintf(stderr, "\n");
-            }
-        }
-        eebus::write32(0x0077E6C0u, eebus::read32(0x0077E6C0u) | 1u);
-        v0 = 1; return true;
+    case 118: v0 = sifdma::dma_stat(a0); return true;                       // SifDmaStat: -1 = selesai
+    case 119: {                                                             // SifSetDma: kick DMA EE<->IOP
+        // Phase 8: bukan lagi stub. sdd[] = {src, dest, size, attr} x a1; paket
+        // sifcmd/sifrpc di-decode di sif_dma, backend host dipanggil, reply ditulis
+        // balik ke bus EE + sema klien di-signal (model iSignalSema _request_end).
+        v0 = sifdma::kick(a0, a1);
+        return true;
     }
     case 120: v0 = 0; return true;                                          // SifSetDChain
     case 121: v0 = eekern::SifSetReg(a0, a1); return true;              // SifSetReg(reg, val)
     case 122: v0 = eekern::SifGetReg(a0); return true;                  // SifGetReg(reg) — poll reg4&0x20000
-    case 124: {                                                             // (RPC init/check)
-        static int rpc_log = 0;
-        if (rpc_log++ < 6)
-            std::fprintf(stderr, "[sys124] #%d a0=0x%08x a1=0x%08x a2=0x%08x\n", rpc_log, a0, a1, a2);
-        v0 = 1; return true;   // EXPERIMENT: treat as success (was 0 -> retry loop)
+    case 124: {                                                             // Deci2Call (debug channel)
+        // BUKAN RPC: tabel syscall kanonik 0x7C = Deci2Call. Arg lapangan
+        // (a0=0x10, a1=0x01fffc30, a2=0x0a) tak punya header sifcmd. Native tanpa
+        // DECI2 driver -> -1 (tak ada channel), sama seperti ps2sdk tanpa deci2.man.
+        static int d2_log = 0;
+        if (d2_log++ < 3)
+            std::fprintf(stderr, "[deci2] #%d func=0x%x arg=0x%08x a2=0x%x -> -1 (no driver)\n",
+                         d2_log, a0, a1, a2);
+        // Nilai balik dipilih dari pengukuran, bukan tebakan: -1 (tak ada channel) membuat
+        // boot stall di pc=0x003b205c (2 B inst, 0 bind); 1 lanjut ke RPC bind.
+        static s32 d2ret = -2;
+        if (d2ret == -2) { const char* e = std::getenv("GH_DECI2_RET"); d2ret = e ? (s32)std::strtol(e, nullptr, 0) : 1; }
+        v0 = (u32)d2ret; return true;
     }
     case 127: v0 = 32 * 1024 * 1024; return true;                           // GetMemorySize 32MB
     case 131: { // FindAddress — SEMANTIK ASLI dari implementasi game sendiri @VMA0x3b64a8:
@@ -196,6 +190,10 @@ int main(int argc, char** argv) {
     static u32 g_trace[1u << 16];    // ring 64K PC (diagnosis spin loop)
     load_elf_into_bus(elf);
     eekern::sif_regs_reset();        // Phase 7b.9: state "IOP siap" (reg4=0x20000)
+    sifrpc::reset();                 // Phase 8: registry server host + statistik
+    sifrpc::install_defaults();      // fileio/pad/cdvd/mcserv
+    sifdma::reset();
+    if (const char* v = std::getenv("GH_SIF_VERBOSE")) sifdma::set_verbose(std::atoi(v));
 
     // sanity: bytes crt0 persis dari disasm (verified): beq v0,v1 @0x100178
     u32 i0 = eebus::read32(0x100178);
@@ -234,9 +232,9 @@ int main(int argc, char** argv) {
     auto t1 = std::chrono::steady_clock::now();
     double sec = std::chrono::duration<double>(t1 - t0).count();
 
-    std::printf("crt0 run: instret=%llu stop=%s pc=0x%08x\n",
+    std::printf("crt0 run: instret=%llu stop=%s pc=0x%08x fault_pc=0x%08x fault_op=%08x\n",
                 (unsigned long long)cpu.instret,
-                cpu.fault ? cpu.fault : "clean-cap", cpu.pc);
+                cpu.fault ? cpu.fault : "clean-cap", cpu.pc, cpu.fault_pc, cpu.fault_op);
     std::printf("syscalls seen: %d ->", g_nsys);
     for (int i = 0; i < g_nsys; i++) std::printf(" %u", g_syscalls_seen[i]);
     std::printf("\n");
@@ -336,6 +334,34 @@ int main(int argc, char** argv) {
                         eebus::read32(pc));
         }
     }
+    // Phase 8 — bukti jalur SIF DMA -> RPC host (angka dari paket nyata)
+    {
+        const sifdma::Stats& d = sifdma::stats();
+        std::printf("sifdma: kicks=%llu entries=%llu ee2iop=%llu(%llu B) iop2ee=%llu(%llu B)\n",
+                    (unsigned long long)d.kicks, (unsigned long long)d.entries,
+                    (unsigned long long)d.ee2iop, (unsigned long long)d.ee2iop_bytes,
+                    (unsigned long long)d.iop2ee, (unsigned long long)d.iop2ee_bytes);
+        std::printf("sifcmd: init=%llu reset=%llu sreg=%llu bind=%llu call=%llu end=%llu other=%llu short=%llu\n",
+                    (unsigned long long)d.cid_init, (unsigned long long)d.cid_reset,
+                    (unsigned long long)d.cid_sreg,
+                    (unsigned long long)d.cid_bind, (unsigned long long)d.cid_call,
+                    (unsigned long long)d.cid_end, (unsigned long long)d.cid_other,
+                    (unsigned long long)d.pkt_short);
+        std::printf("rpc: bind_replies=%llu call_replies=%llu sema_signals=%llu unknown_srv=%llu "
+                    "handler_fail=%llu autostub=%llu payload=%llu B reply=%llu B last{cid=0x%08x srv=0x%08x fno=%u res=%d}\n",
+                    (unsigned long long)d.bind_replies, (unsigned long long)d.call_replies,
+                    (unsigned long long)d.sema_signals, (unsigned long long)d.unknown_server,
+                    (unsigned long long)d.handler_fail, (unsigned long long)d.autostub,
+                    (unsigned long long)d.payload_bytes,
+                    (unsigned long long)d.reply_bytes, d.last_cid, d.last_server, d.last_func,
+                    (int)d.last_result);
+        const sifrpc::Stats& r = sifrpc::stats();
+        std::printf("host-rpc: calls=%llu unknown=%llu in=%llu B out=%llu B | memcard root=%s\n",
+                    (unsigned long long)r.calls, (unsigned long long)r.unknown,
+                    (unsigned long long)r.bytes_in, (unsigned long long)r.bytes_out,
+                    memcard::root().c_str());
+    }
+
     // bukti minimal: SetupThread (60) DAN SetupHeap (61) kena, berurutan
     if (g_nsys < 2 || g_syscalls_seen[0] != 60 || g_syscalls_seen[1] != 61) {
         std::printf("FAIL: urutan syscall crt0 tidak sesuai\n"); fail = 1;

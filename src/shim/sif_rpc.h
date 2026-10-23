@@ -1,6 +1,7 @@
 // sif_rpc — Phase 8: SIF RPC host backend (pengganti IOP).
 // Kontrak: request/response in-memory; paket menyimpan cmd/server/func + payload.
-// Server bawaan: fileio (0x80000001), pad (0x80000121), cdvd (0x80000005).
+// Server bawaan: fileio (0x80000001), pad (0x80000121), cdvd (0x80000005),
+// mcserv (0x80000007 — id placeholder: kartu diakses game lewat device mc0:/ di fileio).
 #pragma once
 #include <cstdint>
 #include <functional>
@@ -11,7 +12,12 @@ namespace sifrpc {
 
 using u8 = uint8_t; using u32 = uint32_t; using s32 = int32_t; using u64 = uint64_t;
 
-enum : u32 { SRV_FILEIO = 0x80000001u, SRV_PAD = 0x80000121u, SRV_CDVD = 0x80000005u };
+enum : u32 {
+    SRV_FILEIO = 0x80000001u,
+    SRV_CDVD   = 0x80000005u,
+    SRV_MCSERV = 0x80000007u,
+    SRV_PAD    = 0x80000121u,
+};
 
 struct Header {
     u32 cmd = 0;       // 1 = call
@@ -30,17 +36,13 @@ bool bound(u32 server);
 std::string server_name(u32 server);
 
 // Encode request jadi byte stream (header 24B + payload), lalu dispatch.
-// Return false kalau server tak dikenal / payload rusak.
 bool call(u32 server, u32 func, const std::vector<u8>& req, std::vector<u8>& reply, s32& result_out);
 
-// Helper codec.
 std::vector<u8> encode(u32 server, u32 func, const std::vector<u8>& req);
 bool decode(const std::vector<u8>& pkt, Header& h, std::vector<u8>& payload);
 
-// Register default backends (fileio/pad/cdvd).
 void install_defaults();
 
-// Statistik nyata buat test/runtime.
 struct Stats { u64 calls = 0, unknown = 0, bytes_in = 0, bytes_out = 0; };
 const Stats& stats();
 

@@ -2,6 +2,9 @@
 // Bukti nyata: baca file asli dari extract ISO lewat jalur RPC fileio.
 #include "host_io.h"
 #include "sif_rpc.h"
+#include "memcard.h"
+#include <cstdlib>
+#include <filesystem>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -34,6 +37,9 @@ static u32 rd32(const std::vector<u8>& v, size_t off = 0) {
 }
 
 int main(int argc, char** argv) {
+    // memcard di direktori uji yang bersih (bukan HOME user)
+    setenv("GH_MEMCARD_DIR", "/root/.hermes/cache/scratch/mc_test", 1);
+    std::filesystem::remove_all("/root/.hermes/cache/scratch/mc_test");
     std::string root = argc > 1 ? argv[1] : "/root/ports/godhand/extract";
     std::printf("root: %s\n", root.c_str());
     chk(hostio::init(root), "hostio::init", hostio::root());
@@ -101,6 +107,59 @@ int main(int argc, char** argv) {
     // 8. listdir root
     auto items = hostio::listdir("cdrom0:\\");
     chk(!items.empty(), "listdir root", std::to_string(items.size()) + " entri");
+
+    // 9. memcard: mkdir + tulis + baca balik + stat + listdir + getinfo
+    chk(memcard::init(), "memcard::init", memcard::root());
+    chk(memcard::mkdir("mc0:/BASLUS-21503"), "memcard mkdir mc0:/BASLUS-21503");
+    chk(!memcard::resolve("mc0:/../etc/passwd", out), "memcard traversal ditolak");
+
+    s32 mfd = memcard::open("mc0:/BASLUS-21503/SAVE.DAT", 3 | 0x200);   // RDWR|CREAT
+    chk(mfd >= 1000, "memcard open CREAT", "fd=" + std::to_string(mfd));
+    std::vector<u8> pattern(4096);
+    for (size_t i = 0; i < pattern.size(); i++) pattern[i] = (u8)(i * 7 + 3);
+    u32 wrote = memcard::write(mfd, pattern.data(), (u32)pattern.size());
+    chk(wrote == 4096, "memcard write 4096 B", std::to_string(wrote) + " B");
+    chk(memcard::lseek(mfd, 0, 0) == 0, "memcard lseek 0");
+    std::vector<u8> back(4096);
+    u32 rgot = memcard::read(mfd, back.data(), (u32)back.size());
+    chk(rgot == 4096 && back == pattern, "memcard read-back byte-exact",
+        std::to_string(rgot) + " B");
+    chk(memcard::size(mfd) == 4096, "memcard size", std::to_string(memcard::size(mfd)));
+    memcard::close(mfd);
+
+    u32 msz = 0, mmode = 0;
+    bool mstat = memcard::stat("mc0:/BASLUS-21503/SAVE.DAT", msz, mmode);
+    chk(mstat && msz == 4096, "memcard stat via path", std::to_string(msz) + " B");
+    auto mc_items = memcard::listdir("mc0:/BASLUS-21503");
+    bool has_save = false;
+    for (auto& it : mc_items) if (it == "SAVE.DAT") has_save = true;
+    chk(has_save, "memcard listdir", std::to_string(mc_items.size()) + " entri");
+
+    memcard::Info mi = memcard::getinfo();
+    chk(mi.used_clusters == 1 && mi.free_clusters == 14 && mi.free_bytes == 14 * 8192,
+        "memcard getinfo cluster", "used=1 free=14 free_bytes=" + std::to_string(mi.free_bytes));
+
+    // 10. getinfo lewat server mcserv (jalur RPC)
+    called = call(SRV_MCSERV, 0, {}, rep, res);
+    u32 rpc_free = rd32(rep, 12);
+    chk(called && res == 0 && rpc_free == 14 * 8192,
+        "mcserv getinfo via RPC", "total=" + std::to_string(rd32(rep, 0)) +
+        " used=" + std::to_string(rd32(rep, 4)) + " free_bytes=" + std::to_string(rpc_free));
+
+    // 11. fileio RPC dengan path mc0: (jalur yang dipakai game untuk save)
+    called = call(SRV_FILEIO, 0, str_req("mc0:/BASLUS-21503/SAVE.DAT", 1), rep, res);
+    s32 mc_rfd = (s32)rd32(rep, 0);
+    chk(called && mc_rfd >= 1000, "fileio.open mc0: via RPC", "fd=" + std::to_string(mc_rfd));
+    called = call(SRV_FILEIO, 5, u32s({(u32)mc_rfd}), rep, res);
+    chk(called && rd32(rep, 0) == 4096, "fileio.size mc0: via RPC",
+        std::to_string(rd32(rep, 0)) + " B");
+    call(SRV_FILEIO, 1, u32s({(u32)mc_rfd}), rep, res);
+
+    // 12. bukti fisik di disk host (read-after-write)
+    std::error_code fec;
+    auto hpath = std::filesystem::path(memcard::root()) / "mc0" / "BASLUS-21503" / "SAVE.DAT";
+    chk(std::filesystem::exists(hpath, fec) && (u32)std::filesystem::file_size(hpath, fec) == 4096,
+        "file save ada di disk host", hpath.string());
 
     const Stats& s = stats();
     std::printf("rpc stats: calls=%llu unknown=%llu in=%llu out=%llu\n",

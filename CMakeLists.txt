@@ -68,7 +68,10 @@ add_executable(crt0_test
   src/shim/ee_cpu.cpp
   src/shim/ee_bus.cpp
   src/shim/ee_kernel.cpp
-  src/shim/host_io.cpp)
+  src/shim/host_io.cpp
+  src/shim/sif_rpc.cpp
+  src/shim/sif_dma.cpp
+  src/shim/memcard.cpp)
 target_include_directories(crt0_test PRIVATE src/shim)
 find_package(Threads REQUIRED)
 target_link_libraries(crt0_test PRIVATE Threads::Threads)
@@ -124,5 +127,24 @@ target_link_libraries(game_demo PRIVATE Vulkan::Vulkan)
 add_executable(sif_test
   src/shim/sif_test.cpp
   src/shim/sif_rpc.cpp
-  src/shim/host_io.cpp)
+  src/shim/host_io.cpp
+  src/shim/memcard.cpp)
 target_include_directories(sif_test PRIVATE src/shim)
+
+# adx_test: decoder CRI ADX vs referensi ffmpeg (bit-exact <=1 LSB)
+add_executable(adx_test
+  src/shim/adx_test.cpp
+  src/shim/adx.cpp)
+target_include_directories(adx_test PRIVATE src/shim)
+
+# sif_dma_test: SifSetDma (syscall 119) -> sifcmd/sifrpc -> backend host (bukti wiring)
+add_executable(sif_dma_test
+  src/shim/sif_dma_test.cpp
+  src/shim/sif_dma.cpp
+  src/shim/sif_rpc.cpp
+  src/shim/host_io.cpp
+  src/shim/memcard.cpp
+  src/shim/ee_bus.cpp
+  src/shim/ee_kernel.cpp)
+target_include_directories(sif_dma_test PRIVATE src/shim)
+target_link_libraries(sif_dma_test PRIVATE Threads::Threads)
