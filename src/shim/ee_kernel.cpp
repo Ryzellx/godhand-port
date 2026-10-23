@@ -80,6 +80,16 @@ std::atomic<s32> g_next_fd{10};
 
 GifKickFn g_gif_kick = nullptr;
 
+// SIF register file (syscall 121 SifSetReg / 122 SifGetReg) — Phase 7b.9.
+// Bukti: game poll SifGetReg(4) & 0x20000 (6,328,099 call sys122 tanpa keluar).
+// Model native: host = "IOP siap" sejak reset -> reg[4] bit 0x20000 set.
+constexpr u32 SIF_REG_N = 16;
+u32  g_sif_reg[SIF_REG_N];
+u64  g_sif_get_n[SIF_REG_N];
+u64  g_sif_set_n[SIF_REG_N];
+u64  g_sif_get_oob = 0, g_sif_set_oob = 0;
+u32  g_sif_get_oob_last = 0, g_sif_set_oob_last = 0;  // regnum terakhir di luar 0..15
+
 void msleep(s32 usec) {
     if (usec > 0)
         std::this_thread::sleep_for(std::chrono::microseconds(usec));
@@ -422,6 +432,28 @@ void scePrintf(const char* fmt, ...) {
 }
 
 u32 FlushCache(u32) { return 0; }
+
+// ---------- SIF register file (syscall 121/122) ----------
+void sif_regs_reset() {
+    for (u32 i = 0; i < SIF_REG_N; i++) { g_sif_reg[i] = 0; g_sif_get_n[i] = 0; g_sif_set_n[i] = 0; }
+    g_sif_get_oob = g_sif_set_oob = 0;
+    // "IOP siap": reg 4 bit 0x20000 = handshake yang di-poll game (lihat 0x3b23c8)
+    g_sif_reg[4] = 0x00020000u;
+}
+u32 SifSetReg(u32 reg, u32 val) {
+    if (reg < SIF_REG_N) { g_sif_reg[reg] = val; g_sif_set_n[reg]++; return 1; }
+    g_sif_set_oob++; g_sif_set_oob_last = reg; return 1;
+}
+u32 SifGetReg(u32 reg) {
+    if (reg < SIF_REG_N) { g_sif_get_n[reg]++; return g_sif_reg[reg]; }
+    g_sif_get_oob++; g_sif_get_oob_last = reg; return 0;
+}
+u32 sif_reg_peek(u32 reg) { return reg < SIF_REG_N ? g_sif_reg[reg] : 0; }
+u64 sif_get_count(u32 reg) { return reg < SIF_REG_N ? g_sif_get_n[reg] : g_sif_get_oob; }
+u64 sif_set_count(u32 reg) { return reg < SIF_REG_N ? g_sif_set_n[reg] : g_sif_set_oob; }
+u32 sif_oob_last(u32 which) { // 0=get-last-reg, 1=set-last-reg
+    return which == 0 ? g_sif_get_oob_last : g_sif_set_oob_last;
+}
 
 void set_gif_kick(GifKickFn fn) { g_gif_kick = fn; }
 

@@ -76,6 +76,11 @@ struct Cpu {
 
 // jalankan sampai stop (syscall tak dikenal / fault / PC di luar RAM / instret cap).
 // handler dipanggil tiap syscall. return true = berhenti (lihat cpu.fault / instret).
+// Phase 7b.9: census busy-delay loop yang di-fast-forward (idiom
+// addiu rt,rt,-1 / 4x nop / bne rt,rs,self). Semantik tetap eksak.
+extern u64 g_delay_loops;
+extern u64 g_delay_inst;
+
 bool run(Cpu& cpu, SyscallFn handler, u64 max_inst);
 
 } // namespace eecpu

@@ -76,6 +76,20 @@ s32 sceClose(s32 fd);
 void scePrintf(const char* fmt, ...); // -> stdout (trace level bisa dipasang nanti)
 u32  FlushCache(u32 addr);            // no-op di native (pipeline coherency tak relevan)
 
+// ---- SIF register file (syscall 121 SifSetReg / 122 SifGetReg) ----
+// Dipakai game buat handshake EE<->IOP. Bukti spin (Phase 7b.9): game poll
+// SifGetReg(4) & 0x20000 sampai non-zero (6,328,099 call sys122 sebelum fix).
+// Model native: host = "IOP siap" sejak reset -> reg[4] = 0x20000.
+// Index = reg & 0xF (asumsi: ruang reg game berupa indeks kecil; reg 0x80000000
+// dari game aliased ke slot 0 — dicatat jujur, disesuaikan kalau ada bukti lain).
+void sif_regs_reset();
+u32  SifSetReg(u32 reg, u32 val);     // tulis reg, return 1 (success)
+u32  SifGetReg(u32 reg);              // baca reg
+u32  sif_reg_peek(u32 reg);           // observasi tanpa census (buat dump)
+u64  sif_get_count(u32 reg);          // reg>=16 -> oob counter
+u64  sif_set_count(u32 reg);
+u32  sif_oob_last(u32 which);         // 0=last get regnum oob, 1=last set
+
 // ---- DMA ch2 (GIF) hook — register 0x1000A000 ----
 // Dipanggil oleh build runtime nanti saat menulis MMIO; default: forward ke callback
 using GifKickFn = void (*)(const void* packet_qwords, u32 qwc);

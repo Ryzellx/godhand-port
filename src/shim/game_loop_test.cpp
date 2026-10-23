@@ -80,7 +80,8 @@ static bool sys_handler(uint32_t num, uint32_t a0, uint32_t a1, uint32_t a2, uin
     case 118: v0 = 0; return true;  // SifDmaStat
     case 119: v0 = 1; return true;  // SifSetDma
     case 120: v0 = 0; return true;  // SifSetDChain
-    case 121: case 122: v0 = 0; return true;
+    case 121: v0 = eekern::SifSetReg(a0, a1); return true;  // SifSetReg
+    case 122: v0 = eekern::SifGetReg(a0); return true;      // SifGetReg — poll reg4&0x20000
     case 124: v0 = 0; return true;
     case 125: case 126: v0 = 0; return true;
     case 127: v0 = 32*1024*1024; return true;

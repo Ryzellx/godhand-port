@@ -22,6 +22,7 @@ static u64 g_census_oob = 0;           // nomor >=160 (di luar array, dicatat ju
 static u32 g_heap_end = 0;
 static u32 g_hist[1u << 21]{};         // hot-PC sampler: bucket = pc>>2 (per instr; 8 MB)
 static u64 g_btb[1u << 21]{};          // backward-taken-branch census per alamat (16 MB)
+static u64 g_sema_autosig = 0;         // WaitSema auto-signal (virtual INTC event) — Phase 7b.9
 
 // shim syscall — mapping ke eekern (kontrak dari syscall_contract.csv)
 static eekern::SemaParam g_sp;
@@ -38,13 +39,32 @@ static bool sys_handler(u32 num, u32 a0, u32 a1, u32 a2, u32 a3, u32& v0) {
     case 64: {  // CreateSema — a0 = pointer param struct di bus mem
         u32 init = eebus::read32(a0 + 8), maxc = eebus::read32(a0 + 12);
         g_sp.init = (s32)init; g_sp.max = (s32)maxc;
+        if (g_sp.max < 1) g_sp.max = 1;   // max<=0 -> SignalSema no-op -> WaitSema deadlock
         g_sema = eekern::CreateSema(&g_sp);
+        std::fprintf(stderr, "[sema] create id=%d init=%d max=%d (raw init=0x%x max=0x%x @0x%08x)\n",
+                     g_sema, g_sp.init, g_sp.max, init, maxc, a0);
         v0 = (u32)g_sema;
         return true;
     }
     case 65: v0 = (u32)eekern::DeleteSema((s32)a0); return true;   // DeleteSema
     case 66: v0 = (u32)eekern::SignalSema((s32)a0); return true;   // SignalSema
-    case 68: v0 = (u32)eekern::WaitSema((s32)a0); return true;     // WaitSema
+    case 68: {  // WaitSema — blokir di host futex. Bukti deadlock 2026-10-21: gdb bt
+                // menunjuk eekern::WaitSema(id=4) ← sys 68, 0% CPU, 1 thread, tanpa
+                // signaler (census: CreateThread 32:1 tapi StartThread 34:0 — thread
+                // tak pernah jalan; SignalSema 66 tak pernah dipanggil game; INTC
+                // dispatch belum ada di CPU). Satu-satunya signaler di HW asli =
+                // INTC handler hasil AddIntcHandler (sys 16:1 tercatat).
+                // Model native: virtual-event auto-signal sekali kalau kosong.
+        // PollSema sukses = token sudah dikonsumsi -> JANGAN WaitSema lagi
+        // (bug iterasi pertama: pol>=0 tapi tetap WaitSema -> count 0 -> deadlock).
+        s32 pol = eekern::PollSema((s32)a0);
+        if (pol >= 0) { v0 = 0; return true; }
+        eekern::SignalSema((s32)a0); g_sema_autosig++;
+        std::fprintf(stderr, "[sema] WaitSema(%d) kosong -> autosig #%llu\n",
+                     (int)a0, (unsigned long long)g_sema_autosig);
+        v0 = (u32)eekern::WaitSema((s32)a0);
+        return true;
+    }
     case 69: v0 = (u32)eekern::PollSema((s32)a0); return true;     // PollSema
     case 32: {  // CreateThread — a0 param struct, a1 = entry, a2 = stack
         eekern::ThreadParam tp;
@@ -67,9 +87,16 @@ static bool sys_handler(u32 num, u32 a0, u32 a1, u32 a2, u32 a3, u32& v0) {
         v0 = 0; return true;
     }
     case 118: v0 = 0; return true;                                          // SifDmaStat: idle
-    case 119: v0 = 1; return true;                                          // SifSetDma: done
+    case 119: {                                                              // SifSetDma: kick DMA EE<->IOP
+        // Native model: IOP-side selesai instan. Sifcmd EE men-set flag[0]
+        // (0x77E6C0) via INTC SIF0-completion pada HW asli; di sini kita tulis
+        // langsung waktu kick supaya poll 0x3b2a58 (idx0) keluar.
+        eebus::write32(0x0077E6C0u, eebus::read32(0x0077E6C0u) | 1u);
+        v0 = 1; return true;
+    }
     case 120: v0 = 0; return true;                                          // SifSetDChain
-    case 121: case 122: v0 = 0; return true;                                // SifSet/GetReg
+    case 121: v0 = eekern::SifSetReg(a0, a1); return true;              // SifSetReg(reg, val)
+    case 122: v0 = eekern::SifGetReg(a0); return true;                  // SifGetReg(reg) — poll reg4&0x20000
     case 124: v0 = 0; return true;                                          // Deci2Call
     case 127: v0 = 32 * 1024 * 1024; return true;                           // GetMemorySize 32MB
     case 131: { // FindAddress — SEMANTIK ASLI dari implementasi game sendiri @VMA0x3b64a8:
@@ -146,6 +173,7 @@ int main(int argc, char** argv) {
     u32 trace_dump = argc > 3 ? (u32)std::strtoul(argv[3], nullptr, 10) : 0; // n PC terakhir utk dump
     static u32 g_trace[1u << 16];    // ring 64K PC (diagnosis spin loop)
     load_elf_into_bus(elf);
+    eekern::sif_regs_reset();        // Phase 7b.9: state "IOP siap" (reg4=0x20000)
 
     // sanity: bytes crt0 persis dari disasm (verified): beq v0,v1 @0x100178
     u32 i0 = eebus::read32(0x100178);
@@ -203,6 +231,17 @@ int main(int argc, char** argv) {
     std::printf(" | distinct=%llu total=%llu\n",
                 (unsigned long long)distinct, (unsigned long long)total_sys);
 
+    // SIF register file census (Phase 7b.9) — get/set per reg + nilai akhir reg4 (poll target)
+    std::printf("sif-regs get:");
+    for (u32 r = 0; r < 16; r++) if (eekern::sif_get_count(r)) std::printf(" %u:%llu", r, (unsigned long long)eekern::sif_get_count(r));
+    if (eekern::sif_get_count(16)) std::printf(" oob:%llu(last=0x%08x)", (unsigned long long)eekern::sif_get_count(16), eekern::sif_oob_last(0));
+    std::printf(" | set:");
+    for (u32 r = 0; r < 16; r++) if (eekern::sif_set_count(r)) std::printf(" %u:%llu", r, (unsigned long long)eekern::sif_set_count(r));
+    if (eekern::sif_set_count(16)) std::printf(" oob:%llu(last=0x%08x)", (unsigned long long)eekern::sif_set_count(16), eekern::sif_oob_last(1));
+    std::printf(" | reg4=0x%08x\n", eekern::sif_reg_peek(4));
+    std::printf("sema-autosig=%llu (WaitSema virtual-event, Phase 7b.9)\n",
+                (unsigned long long)g_sema_autosig);
+
     // top-12 hot PC (sort: count desc, lalu alamat asc -> deterministik)
     struct H { u32 n, b; };
     std::vector<H> hs;
@@ -252,6 +291,12 @@ int main(int argc, char** argv) {
     std::printf("backward-branch census top8 (total=%llu):\n", (unsigned long long)btb_total);
     for (size_t i = 0; i < bs.size() && i < 8; i++)
         std::printf("  0x%08x n=%llu\n", bs[i].b << 2, (unsigned long long)bs[i].n);
+
+    // Phase 7b.9 — busy-delay fast-forward census (semantik eksak, instret tetap dihitung)
+    std::printf("delay-loops skipped=%llu inst_skipped=%llu (%.1f%% dari instret)\n",
+                (unsigned long long)eecpu::g_delay_loops,
+                (unsigned long long)eecpu::g_delay_inst,
+                cpu.instret ? 100.0 * (double)eecpu::g_delay_inst / (double)cpu.instret : 0.0);
 
     std::fprintf(stderr, "timing: %.2f s (%.1f M inst/s)\n", sec,
                  sec > 0 ? cpu.instret / sec / 1e6 : 0.0);

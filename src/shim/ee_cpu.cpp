@@ -139,9 +139,49 @@ static inline void fset(Cpu& c, u32 i, float v) { u32 b; std::memcpy(&b, &v, 4);
 
 // __PART3__
 
+u64 g_delay_loops = 0;
+u64 g_delay_inst  = 0;
+
 bool run(Cpu& c, SyscallFn handler, u64 max_inst) {
     while (c.instret < max_inst) {
         u32 cur_pc = c.pc;
+
+        // ---- Phase 7b.9: busy-delay fast-forward -------------------------
+        // Idiom game (contoh 0x399190): addiu rt,rt,-1 ; 4x nop ; bne rt,rs,<self>
+        // Body cuma decrement + compare, tak ada efek samping dan tak ada IRQ di
+        // interpreter ini -> hasil akhirnya eksak: rt = rs, lompat keluar.
+        {
+            u32 w0 = eebus::read32(c.pc);
+            if (op(w0) == 0x09 && rs(w0) == rt(w0) && rt(w0) != 0 && (w0 & 0xFFFFu) == 0xFFFFu) {
+                bool plain = true;
+                for (int i = 1; i <= 4 && plain; ++i)
+                    if (eebus::read32(c.pc + i * 4) != 0) plain = false;
+                if (plain) {
+                    u32 w5 = eebus::read32(c.pc + 20);   // bne
+                    u32 w6 = eebus::read32(c.pc + 24);   // delay slot
+                    if (op(w5) == 0x05 && rs(w5) == rt(w0) && w6 == 0) {
+                        u32 br_pc = c.pc + 20;                     // alamat bne
+                        u32 target = br_pc + 4 + ((u32)(s32)(int16_t)(w5 & 0xFFFFu) << 2);
+                        if (target == c.pc) {
+                            u32 cur = c.r[rt(w0)][0];
+                            u32 other = c.r[rt(w5)][0];
+                            u64 n = (u32)(cur - other);            // jumlah decrement sampai == other
+                            if (n == 0) n = 0x100000000ull;      // wrap penuh
+                            if (n >= 4096 && n <= 200000000ull) {
+                                c.r[rt(w0)][0] = other;
+                                c.instret += n * 7;               // 7 instr/iterasi
+                                c.pc = c.pc + 0x1c;               // setelah delay slot
+                                c.next_pc = c.pc + 4;
+                                g_delay_loops++;
+                                g_delay_inst += n * 7;
+                                continue;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         if (cur_pc == 0x003b1ce4) {
             static int dbg_count = 0;
             if (dbg_count++ < 3) {

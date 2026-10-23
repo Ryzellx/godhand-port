@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>God Hand — Native Port Launcher</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="grain"></div>
+
+<header class="top">
+  <div class="brand">
+    <div class="mark">GH</div>
+    <div class="titles">
+      <h1>GOD HAND</h1>
+      <p>native port launcher <span class="dot">·</span> SLUS-21503</p>
+    </div>
+  </div>
+
+  <div class="statusline">
+    <div class="pill" id="discPill"><span class="led"></span><span id="discText">no disc</span></div>
+    <div class="phasewrap">
+      <div class="phasetop">
+        <span id="phaseLabel">engine phase —</span>
+        <span id="phasePct">0%</span>
+      </div>
+      <div class="bar"><i id="phaseBar" style="width:0%"></i></div>
+    </div>
+  </div>
+</header>
+
+<nav class="tabs" id="tabs">
+  <button class="tab active" data-tab="library">Library</button>
+  <button class="tab" data-tab="graphics">Graphics</button>
+  <button class="tab" data-tab="audio">Audio</button>
+  <button class="tab" data-tab="controls">Controls</button>
+  <button class="tab" data-tab="launch">Launch</button>
+</nav>
+
+<main>
+  <!-- LIBRARY -->
+  <section class="panel active" id="panel-library">
+    <div class="card">
+      <div class="card-head">
+        <h2>Game Disc</h2>
+        <span class="hint">path ke ISO God Hand — dibaca langsung, tidak disalin</span>
+      </div>
+      <div class="row">
+        <input id="isoPath" type="text" spellcheck="false" placeholder="/path/to/God_Hand_USA_SLUS21503.iso">
+        <button class="btn" id="btnBrowseIso">Browse</button>
+        <button class="btn ghost" id="btnCheckIso">Check</button>
+      </div>
+      <div class="discgrid" id="discGrid">
+        <div class="kv"><span>Disc ID</span><b id="dId">—</b></div>
+        <div class="kv"><span>Region</span><b id="dRegion">—</b></div>
+        <div class="kv"><span>Version</span><b id="dVer">—</b></div>
+        <div class="kv"><span>Volume</span><b id="dVol">—</b></div>
+        <div class="kv"><span>Size</span><b id="dSize">—</b></div>
+        <div class="kv"><span>Boot file</span><b id="dBoot">—</b></div>
+      </div>
+      <div class="row hashrow">
+        <button class="btn ghost" id="btnHash">Verify MD5</button>
+        <div class="hashbar"><i id="hashBar" style="width:0%"></i></div>
+        <code id="hashVal">—</code>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <h2>Port Binary</h2>
+        <span class="hint">kosongkan untuk auto-detect build native</span>
+      </div>
+      <div class="row">
+        <input id="exePath" type="text" spellcheck="false" placeholder="auto: godhand_native / godhand.exe">
+        <button class="btn" id="btnBrowseExe">Browse</button>
+      </div>
+      <ul class="filelist" id="binList"></ul>
+    </div>
+  </section>
+
+  <!-- GRAPHICS -->
+  <section class="panel" id="panel-graphics">
+    <div class="card">
+      <div class="card-head"><h2>Renderer</h2><span class="hint">backend GPU</span></div>
+      <div class="row wrap">
+        <div class="seg" id="segRenderer">
+          <button data-v="vulkan" class="on">Vulkan</button>
+          <button data-v="d3d12">D3D12</button>
+          <button data-v="opengl">OpenGL</button>
+          <button data-v="software">Software</button>
+        </div>
+      </div>
+      <div class="row wrap">
+        <label class="field"><span>Resolution</span>
+          <select id="resolution">
+            <option>1280x720</option><option>1600x900</option><option selected>1920x1080</option>
+            <option>2560x1440</option><option>3840x2160</option><option value="custom">Custom…</option>
+          </select>
+        </label>
+        <label class="field hide" id="customResWrap"><span>Custom</span>
+          <div class="inline"><input id="resW" type="number" min="640" max="7680" value="2560"> ×
+            <input id="resH" type="number" min="480" max="4320" value="1440"></div>
+        </label>
+        <label class="field"><span>Window mode</span>
+          <select id="window_mode">
+            <option value="windowed">Windowed</option>
+            <option value="borderless">Borderless</option>
+            <option value="fullscreen">Fullscreen</option>
+          </select>
+        </label>
+      </div>
+      <div class="row wrap">
+        <label class="field grow"><span>Internal resolution scale <b id="scaleVal">1.0×</b></span>
+          <input id="internal_scale" type="range" min="1" max="4" step="0.25" value="1">
+        </label>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><h2>Image Quality</h2><span class="hint">post-process & filter</span></div>
+      <div class="row wrap">
+        <label class="field"><span>MSAA</span>
+          <select id="msaa"><option value="1">Off</option><option value="2">2×</option>
+            <option value="4">4×</option><option value="8">8×</option></select>
+        </label>
+        <label class="field"><span>Anisotropic</span>
+          <select id="anisotropy"><option value="1">Off</option><option value="2">2×</option>
+            <option value="4">4×</option><option value="8" selected>8×</option><option value="16">16×</option></select>
+        </label>
+        <label class="field"><span>Texture filter</span>
+          <select id="texture_filter"><option value="linear">Linear</option>
+            <option value="nearest">Nearest (retro)</option></select>
+        </label>
+        <label class="field"><span>FPS cap</span>
+          <select id="fps_cap"><option value="60">60</option><option value="120">120</option>
+            <option value="144">144</option><option value="0">Uncapped</option></select>
+        </label>
+      </div>
+      <div class="row wrap">
+        <label class="toggle"><input type="checkbox" id="vsync" checked><span></span> V-Sync</label>
+        <label class="toggle"><input type="checkbox" id="widescreen"><span></span> Widescreen 16:9 hack</label>
+        <label class="toggle"><input type="checkbox" id="frame_skip"><span></span> Frame skip</label>
+      </div>
+    </div>
+  </section>
+
+  <!-- AUDIO -->
+  <section class="panel" id="panel-audio">
+    <div class="card">
+      <div class="card-head"><h2>Audio</h2><span class="hint">ADX / CRI stream dari disc</span></div>
+      <label class="field grow"><span>Master <b id="vMaster">100</b></span>
+        <input id="volume_master" type="range" min="0" max="100" value="100"></label>
+      <label class="field grow"><span>Music / BGM <b id="vBgm">80</b></span>
+        <input id="volume_bgm" type="range" min="0" max="100" value="80"></label>
+      <label class="field grow"><span>SFX <b id="vSfx">90</b></span>
+        <input id="volume_sfx" type="range" min="0" max="100" value="90"></label>
+      <div class="row wrap">
+        <label class="field"><span>Backend</span>
+          <select id="audio_backend"><option value="auto">Auto</option><option value="wasapi">WASAPI</option>
+            <option value="asio">ASIO</option><option value="null">Null (no audio)</option></select>
+        </label>
+        <label class="field"><span>Voice language</span>
+          <select id="language"><option value="en">English</option><option value="jp">Japanese</option></select>
+        </label>
+      </div>
+    </div>
+  </section>
+
+  <!-- CONTROLS -->
+  <section class="panel" id="panel-controls">
+    <div class="card">
+      <div class="card-head"><h2>Keyboard</h2><span class="hint">klik binding lalu tekan tombol</span></div>
+      <div class="binds" id="keybindList"></div>
+      <button class="btn ghost" id="btnResetKeys">Reset default</button>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><h2>Gamepad</h2><span id="padStatus" class="pill small"><span class="led"></span><span>tidak terdeteksi</span></span></div>
+      <div class="row wrap">
+        <label class="toggle"><input type="checkbox" id="gpEnabled" checked><span></span> Aktifkan gamepad</label>
+        <label class="toggle"><input type="checkbox" id="gpVib" checked><span></span> Vibration</label>
+        <label class="field grow"><span>Deadzone <b id="dzVal">0.15</b></span>
+          <input id="gpDeadzone" type="range" min="0" max="0.5" step="0.01" value="0.15"></label>
+      </div>
+      <div class="binds" id="padbindList"></div>
+      <p class="hint padhint">Pencet tombol di controller saat baris sedang merekam.</p>
+    </div>
+  </section>
+
+  <!-- LAUNCH -->
+  <section class="panel" id="panel-launch">
+    <div class="card launchcard">
+      <div class="launchgrid">
+        <div>
+          <h2>Ready to rumble</h2>
+          <ul class="summary" id="summary"></ul>
+        </div>
+        <button class="play" id="btnPlay"><span>PLAY</span><small>launch native port</small></button>
+      </div>
+      <p class="notice" id="playNotice"></p>
+    </div>
+    <div class="card">
+      <div class="card-head"><h2>Diagnostics</h2><span class="hint">jalankan boot test engine nyata</span></div>
+      <div class="row">
+        <button class="btn ghost" id="btnDiag">Run crt0 boot test</button>
+        <button class="btn ghost" id="btnSave">Save config</button>
+      </div>
+      <pre class="console" id="console">— output muncul di sini —</pre>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <span>God Hand © Capcom / Clover Studio · launcher ini tidak mendistribusikan game</span>
+  <span id="cfgPath"></span>
+</footer>
+
+<script src="app.js"></script>
+</body>
+</html>
