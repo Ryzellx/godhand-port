@@ -252,3 +252,8 @@ decoder ADX. Semua angka di bawah dari run nyata, bukan klaim.
 **5) Test floor** (semua PASS, 5× berturut kecuali disebut): gif_test · shim_test · bus_test ·
 sif_test 31/31 · sif_dma_test 10/10 · adx_test (3 varian) · godhand_slice (setarch -R, rc=0) ·
 crt0_test 2 B inst deterministik (md5 644fa8b7…).
+
+**6) Repo**: commit `0f7d1ee` (4 commit termasuk Phase 7b.9 & slice Phase 8 sebelumnya) sudah
+di-push ke `origin/main` (github.com/Ryzellx/godhand-port). Ledger ini dimirror ke
+`docs/PROJECT.md` + `docs/ENGINE-MAP.md` di repo supaya selamat kalau VPS di-rebuild.
+Verifikasi push: `git ls-tree -r HEAD` tidak memuat ISO/7z/token (163 file, .git 6,0 MB).
