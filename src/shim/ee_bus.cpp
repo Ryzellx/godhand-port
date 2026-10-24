@@ -1,6 +1,10 @@
 // ee_bus.cpp — RAM EE + register DMA ch2 (GIF). Transfer sinkron: kick -> sink GIF
 // (eekern::dma_ch2_kick) -> STR clear, jadi poll busy game (CHCR & 0x100) selalu lolos.
 #include "ee_bus.h"
+#include <map>
+#include <string>
+#include <vector>
+#include <algorithm>
 #include "ee_kernel.h"
 
 #include <cstring>
@@ -82,7 +86,14 @@ bool mem_read(u32 addr, void* out, size_t n) {
     return true;
 }
 
+// Phase 12: census alamat MMIO yang DITULIS (siapa yang digerakkan game).
+std::map<u32, u64> g_mmio_census;
+std::map<u32, std::map<u32, u64>> g_mmio_pc;   // addr -> (pc -> n), top writer
 void mmio_write32(u32 addr, u32 val) {
+    g_mmio_census[addr]++;
+    // Phase 12: provenance penulis untuk SEBARANG alamat MMIO (bukan hanya GIF) supaya
+    // blok yang belum dipetakan (0x10009000, 0x1000E010/E020, ...) bisa diidentifikasi.
+    g_mmio_pc[addr][g_cur_pc]++;
     switch (addr) {
     case CH2_QWC:  g_qwc = val & 0xFFFF; break;
     case CH2_MADR: g_madr = val; break;
@@ -182,6 +193,29 @@ void write32(u32 addr, u32 v) {
     watch_log(addr, v, 4);
     u32 off = addr & RAM_MASK;
     if (off + 4 <= RAM_SIZE) std::memcpy(ram().data() + off, &v, 4);
+}
+
+std::string mmio_pc_csv(u32 addr, size_t top) {
+    std::vector<std::pair<u64, u32>> v;
+    for (auto& kv : g_mmio_pc[addr]) v.push_back({kv.second, kv.first});
+    std::sort(v.begin(), v.end(), [](auto& a, auto& b) { return a.first != b.first ? a.first > b.first : a.second < b.second; });
+    std::string s;
+    for (size_t i = 0; i < v.size() && i < top; i++) {
+        char b[40]; std::snprintf(b, sizeof b, "%08x=%llu; ", v[i].second, (unsigned long long)v[i].first);
+        s += b;
+    }
+    return s;
+}
+std::string mmio_csv(size_t top) {
+    std::vector<std::pair<u64, u32>> v;
+    for (auto& kv : g_mmio_census) v.push_back({kv.second, kv.first});
+    std::sort(v.begin(), v.end(), [](auto& a, auto& b) { return a.first != b.first ? a.first > b.first : a.second < b.second; });
+    std::string s;
+    for (size_t i = 0; i < v.size() && i < top; i++) {
+        char b[40]; std::snprintf(b, sizeof b, "%08x=%llu; ", v[i].second, (unsigned long long)v[i].first);
+        s += b;
+    }
+    return s;
 }
 
 } // namespace eebus

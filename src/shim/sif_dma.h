@@ -10,6 +10,7 @@
 #pragma once
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace sifdma {
 
@@ -42,6 +43,13 @@ struct Stats {
     u32 last_recvbuf = 0, last_pkt = 0;
 };
 const Stats& stats();
+
+// Phase 12 — census per (sid,fno): sumber tunggal untuk tahu apa yang game minta.
+struct Hit { u32 sid = 0, fno = 0; u64 n = 0; u32 last_pay = 0, last_rep = 0; s32 last_res = 0; u32 last_pc = 0; u32 last_cd = 0; };
+const std::vector<Hit>& census();          // urut n menurun
+std::string census_csv();                  // "sid fno n pay rep res pc; ..."
+std::string caller_csv();                  // "ra=n; ..." urut n menurun (provenance RPC)
+
 
 void reset();                        // RAM IOP + statistik + id DMA
 u32  kick(u32 sdd_addr, u32 count);  // syscall 119: return dma id (0 = gagal)

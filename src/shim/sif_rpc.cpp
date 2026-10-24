@@ -268,7 +268,21 @@ static s32 pad_handler(u32 func, const std::vector<u8>& req, std::vector<u8>& re
             }
         };
         w(0, 0x12);                                    // echo command word request
-        w(4, 0x0000FFFFu);                             // tombol port 0 (aktif-low, lepas)
+        // Phase 12: injeksi input. GH_PAD_PRESS = mask tombol yang DITEKAN (bit aktif-high,
+        // sama seperti konstanta PAD_* DI SINI: 0x0008 START, 0x4000 CROSS, 0x2000 CIRCLE),
+        // GH_PAD_AT = poll ke berapa mulai tekan (default 0), GH_PAD_HOLD = berapa poll
+        // ditahan (default 2^32 = terus). Word[4] di-protocol aktif-LOW -> bit ditekan = 0.
+        static u64 pad_poll = 0;
+        u32 held = 0;
+        if (const char* pm = std::getenv("GH_PAD_PRESS")) {
+            u32 mask = (u32)std::strtoul(pm, nullptr, 0);
+            u64 at = 0, hold = ~0ull;
+            if (const char* pa = std::getenv("GH_PAD_AT")) at = std::strtoull(pa, nullptr, 0);
+            if (const char* ph = std::getenv("GH_PAD_HOLD")) hold = std::strtoull(ph, nullptr, 0);
+            if (pad_poll >= at && pad_poll - at < hold) held = mask;
+        }
+        pad_poll++;
+        w(4, 0x0000FFFFu & ~held);                      // tombol port 0 (aktif-low)
         w(8, 0x00007F7Fu);                             // axis X/Y netral
         w(12, (4u << 8) | port);                       // state STABLE(4) << 8 | port
         return 0;

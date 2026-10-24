@@ -8,6 +8,7 @@
 #pragma once
 #include "ee_bus.h"
 #include <cstdint>
+#include <string>
 
 namespace eecpu {
 
@@ -73,6 +74,13 @@ struct Cpu {
     // Probe bersyarat: halt saat pc == probe_pc DAN r[probe_reg] >= probe_min.
     // Dipakai membekukan state tepat di call site yang argumennya liar.
     u32  probe_pc = 0, probe_reg = 0, probe_min = 0;
+    // --- Phase 12: poke terjadwal (diagnosa A/B) --------------------------------
+    // Tulis 64-bit ke addr sekali saat instret >= at. Dipakai membuktikan hipotesis
+    // "flag X = gerbang kemajuan": poke lalu lihat apakah game maju. Nol efek kalau
+    // tidak dipakai (poke_n == 0).
+    struct Poke { u32 addr, val; u64 at; bool done; };
+    Poke poke[4];
+    int  poke_n = 0;
     u32  prev_inst = 0;      // opcode instruksi terakhir yg dieksekusi (deteksi delay-slot)
     u32  halt_skip = 0;      // lewati N hit pertama (utk membedakan panggilan ke-2 dst)
     u32  halt_skipped = 0;
@@ -146,6 +154,9 @@ bool thread_yield_if_other();
 // Phase 7b.9: census busy-delay loop yang di-fast-forward (idiom
 // addiu rt,rt,-1 / 4x nop / bne rt,rs,self). Semantik tetap eksak.
 inline u32 g_syscall_pc = 0;   // pc instruksi SYSCALL terakhir (diagnosa provenance)
+inline u32 g_syscall_ra = 0;
+void sys_pc_note(u32 num, u32 pc, u32 ra);
+std::string sys_pc_csv();   // provenance syscall: "num@pc=n(ra); ..."   // ra pemanggil saat SYSCALL (provenance jalur RPC)
 inline u64 g_syscall_ivariant = 0;   // jumlah syscall varian "i" (nomor negatif) yang dinormalkan
 // INTC handler table (syscall 16/17/19). Pixel/VSync dispatch: lihat intc_dispatch().
 int  intc_add(u32 cause, u32 handler, u32 arg);

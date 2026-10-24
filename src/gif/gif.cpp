@@ -44,6 +44,22 @@ bool parse_stream(const uint8_t* buf, size_t len, std::vector<Action>& out, size
         if (t.flg == (Flag)3) t.flg = Flag::IMAGE;  // IMAGE2 alias (PCSX2)
         off += 16;
         size_t pay = payload_qwords(t);
+        // Phase 12 — koreksi NREG utk tag yang dibangun microcode/driver game:
+        // helper `0x396DC0` mengirim QWC = header+1 dengan NREG=0 (yang menurut manual
+        // berarti 16) padahal payload cuma `nloop` qword dan REGS[0]=0xE (A+D).
+        // Terukur 2.305 paket / 50.710 record di crt0 400 M: SEMUA record punya addr
+        // register GS (<=0x7F), jadi tafsir "1 reg per loop" yang benar. Aturan di bawah
+        // hanya aktif kalau tafsir NREG=16 TIDAK muat di sisa buffer (paket valid tak
+        // tersentuh) dan sisa qword habis dibagi nloop.
+        if (t.flg == Flag::PACKED && t.nreg == 0 && t.nloop && off + pay * 16 > len) {
+            size_t avail_q = (len - off) / 16;
+            size_t try_nreg = avail_q / t.nloop;
+            if (try_nreg >= 1 && try_nreg <= 16 && try_nreg * t.nloop == avail_q) {
+                nreg = try_nreg;
+                pay = t.nloop * nreg;
+                t.nreg = (uint32_t)nreg;
+            }
+        }
         if (off + pay * 16 > len) return false;     // truncated
 
         // PRE=1 (PACKED): PRIM dikirim bareng tag

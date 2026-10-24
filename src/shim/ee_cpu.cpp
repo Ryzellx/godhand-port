@@ -6,8 +6,12 @@
 // pakai tabel byte-level MIPS LE klasik.
 #include "ee_cpu.h"
 #include "ee_mmi.h"
+#include <algorithm>
 #include <cstdio>
 #include <cmath>
+#include <map>
+#include <string>
+#include <vector>
 #include <cstring>
 
 namespace eecpu {
@@ -402,8 +406,19 @@ bool run(Cpu& c, SyscallFn handler, u64 max_inst) {
         }
         if (!(c.cop0[12] & 1u)) g_ie0_inst++;
         u32 cur_pc = c.pc;
+        // Phase 12: poke terjadwal (A/B flag gate). Nol biaya kalau tak dipakai.
+        for (int pi = 0; pi < c.poke_n; pi++) {
+            Cpu::Poke& pk = c.poke[pi];
+            if (!pk.done && c.instret >= pk.at) {
+                pk.done = true;
+                eebus::write32(pk.addr, pk.val);
+                eebus::write32(pk.addr + 4, 0);
+                std::fprintf(stderr, "[poke] inst=%llu addr=0x%08x val=0x%08x\n",
+                             (unsigned long long)c.instret, pk.addr, pk.val);
+            }
+        }
 
-        if (eebus::g_watch_lo) eebus::g_cur_pc = cur_pc;
+        eebus::g_cur_pc = cur_pc;   // Phase 12: provenance MMIO (murah, satu store)
         // ---- halt + execution-window trace (observasi murni, nol ubah state) ----
         if (c.halt_pc && cur_pc == c.halt_pc) {
             if (c.halt_skipped < c.halt_skip) { c.halt_skipped++; }
@@ -643,6 +658,8 @@ bool run(Cpu& c, SyscallFn handler, u64 max_inst) {
                     }
                 }
                 g_syscall_pc = c.pc;
+                g_syscall_ra = c.r[31][0];
+                sys_pc_note(num, c.pc, c.r[31][0]);
                 u32 v0 = 0;
                 bool known = handler(num, c.r[4][0], c.r[5][0], c.r[6][0], c.r[7][0], v0);
                 if (!known) {
@@ -1203,6 +1220,37 @@ bool run(Cpu& c, SyscallFn handler, u64 max_inst) {
         }
     }
     return true;   // instret cap — normal utk run berbatas
+}
+
+} // namespace eecpu
+
+namespace eecpu {
+// Phase 12 — provenance syscall: (num,pc) -> hitungan, plus ra pemanggil.
+namespace {
+struct SpRec { u32 num, pc, ra; u64 n; };
+std::map<u64, size_t> g_sp_ix;
+std::vector<SpRec> g_sp;
+}
+void sys_pc_note(u32 num, u32 pc, u32 ra) {
+    u64 key = ((u64)num << 32) | pc;
+    auto it = g_sp_ix.find(key);
+    if (it == g_sp_ix.end()) { g_sp_ix[key] = g_sp.size(); g_sp.push_back({num, pc, ra, 1}); }
+    else { g_sp[it->second].n++; g_sp[it->second].ra = ra; }
+}
+std::string sys_pc_csv() {
+    std::vector<const SpRec*> v; v.reserve(g_sp.size());
+    for (auto& r : g_sp) v.push_back(&r);
+    std::sort(v.begin(), v.end(), [](const SpRec* a, const SpRec* b) {
+        return a->n != b->n ? a->n > b->n : (a->num != b->num ? a->num < b->num : a->pc < b->pc);
+    });
+    std::string s;
+    for (size_t i = 0; i < v.size() && i < 16; i++) {
+        char b[64];
+        std::snprintf(b, sizeof b, "%u@%08x=%llu(ra%08x); ", v[i]->num, v[i]->pc,
+                      (unsigned long long)v[i]->n, v[i]->ra);
+        s += b;
+    }
+    return s;
 }
 
 } // namespace eecpu

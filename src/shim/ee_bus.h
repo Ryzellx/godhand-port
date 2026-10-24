@@ -8,6 +8,7 @@
 #pragma once
 #include <cstdint>
 #include <cstddef>
+#include <string>
 
 namespace eebus {
 
@@ -49,6 +50,8 @@ struct Stats {
     bool last_tte = false;  // bit31 TTE pada kick terakhir
 };
 const Stats& stats();
+std::string mmio_csv(size_t top = 16);
+std::string mmio_pc_csv(u32 addr, size_t top = 6);   // top penulis MMIO per alamat   // census alamat MMIO tulis (Phase 12)
 
 // --- debug: watchpoint tulis (diagnosis Phase 8/9) -------------------------
 // watch_lo < addr < watch_hi -> cetak [WW] pc/addr/val ke stderr. pc diisi CPU

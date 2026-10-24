@@ -38,7 +38,11 @@ static s32 g_sema = -1;
 // produksi (`gif::parse_stream`, unit-test 6/6). Yang diukur: berapa kick, berapa tag,
 // berapa aksi ter-normalisasi, dan berapa paket yang gagal parse. Nol render di sini —
 // hanya bukti bahwa rantai game->DMA->parser tersambung tanpa emulator.
-struct GifCensus { u64 kicks = 0, tags = 0, actions = 0, bad = 0, qwords = 0; };
+struct GifCensus { u64 kicks = 0, tags = 0, actions = 0, bad = 0, qwords = 0;
+    // Phase 12: jalur "tag 1 qword + N record A+D 16 B" (QWC = nloop+1, helper 0x396DC0).
+    // Parser produksi menolak paket ini (NREG=0 -> 16 reg -> truncated); di sini diukur
+    // apa isinya: kalau addr-nya register GS nyata (<=0x7F), ini trafik GS sungguhan.
+    u64 ad_pkts = 0, ad_recs = 0, ad_addr_bad = 0; u32 ad_addr[8] = {0}; int ad_addr_n = 0; };
 static GifCensus g_gif;
 
 static void gif_kick_census(const void* packet, u32 qwc) {
@@ -55,7 +59,32 @@ static void gif_kick_census(const void* packet, u32 qwc) {
     while (off + 16 <= len) {
         std::vector<gif::Action> acts;
         size_t used = 0;
-        if (!gif::parse_stream(buf + off, len - off, acts, &used) || used == 0) { g_gif.bad++; break; }
+        if (!gif::parse_stream(buf + off, len - off, acts, &used) || used == 0) {
+            if (g_gif.bad < 3 && std::getenv("GH_GIF_DUMP")) {
+                std::fprintf(stderr, "[gif] FAIL kick#%llu off=%zu len=%zu qwc=%u madr=%08x chcr=%x tte=%d:", (unsigned long long)g_gif.kicks, off, len, qwc,
+                             eebus::stats().last_madr, eebus::stats().last_chcr, eebus::stats().last_tte ? 1 : 0);
+                for (u32 i = 0; i < 384 && off + i < len; i++) std::fprintf(stderr, "%02x", buf[off + i]);
+                std::fprintf(stderr, "\n");
+            }
+            // Phase 12: fallback A+D stream (lihat catatan di GifCensus).
+            {
+                const u8* t = buf + off;
+                u32 tagw0 = (u32)t[0] | ((u32)t[1] << 8) | ((u32)t[2] << 16) | ((u32)t[3] << 24);
+                u32 nloop = tagw0 & 0x7FFFu;
+                if (nloop && (size_t)(nloop + 1) * 16 == len - off) {
+                    g_gif.ad_pkts++;
+                    for (u32 i = 1; i <= nloop; i++) {
+                        const u8* r = t + (size_t)i * 16;
+                        u32 addr = ((u32)r[8] | ((u32)r[9] << 8) | ((u32)r[10] << 16) | ((u32)r[11] << 24)) & 0x7FFu;
+                        g_gif.ad_recs++;
+                        if (addr > 0x7F) g_gif.ad_addr_bad++;
+                        else if (g_gif.ad_addr_n < 8 && (g_gif.ad_addr_n == 0 || g_gif.ad_addr[g_gif.ad_addr_n-1] != addr))
+                            g_gif.ad_addr[g_gif.ad_addr_n++] = addr;
+                    }
+                }
+            }
+            g_gif.bad++; break;
+        }
         g_gif.tags++;
         g_gif.actions += acts.size();
         off += used;
@@ -242,17 +271,41 @@ static bool sys_handler(u32 num, u32 a0, u32 a1, u32 a2, u32 a3, u32& v0) {
     return true;
 }
 
-static void load_elf_into_bus(const char* path) {
-    FILE* f = fopen(path, "rb");
+// Phase 12: loader generik — baca ELF32 header, muat SEMUA segmen PT_LOAD (filesz),
+// sisa memsz = bss (RAM sudah nol dari eebus::reset). Return entry point.
+// Retail SLUS_215.03 dan proto JP SLPM_665.50 dua-duanya satu segmen PT_LOAD, tapi
+// ukuran/entry dibaca dari file, bukan hardcode (dulu filesz 0x360ce4 dipaku).
+static u32 load_elf_into_bus(const char* path) {
+    std::FILE* f = std::fopen(path, "rb");
     if (!f) { std::fprintf(stderr, "ELF tidak ketemu: %s\n", path); exit(2); }
-    // program header tunggal: offset 0x001000 -> vaddr 0x00100000, filesize 0x360ce4
-    const u32 file_off = 0x001000, vaddr = 0x00100000, filesz = 0x360ce4;
-    std::vector<u8> buf(filesz);
-    fseek(f, file_off, SEEK_SET);
-    if (fread(buf.data(), 1, filesz, f) != filesz) { std::fprintf(stderr, "read fail\n"); exit(2); }
-    fclose(f);
+    std::vector<u8> img;
+    { std::fseek(f, 0, SEEK_END); long n = std::ftell(f); std::fseek(f, 0, SEEK_SET);
+      if (n <= 0) { std::fprintf(stderr, "ELF kosong\n"); exit(2); }
+      img.resize((size_t)n); if (std::fread(img.data(), 1, img.size(), f) != img.size()) { std::fprintf(stderr, "read fail\n"); exit(2); } }
+    std::fclose(f);
+    auto rd16 = [&](size_t o) { return (u32)img[o] | ((u32)img[o + 1] << 8); };
+    auto rd32 = [&](size_t o) { return (u32)img[o] | ((u32)img[o + 1] << 8) | ((u32)img[o + 2] << 16) | ((u32)img[o + 3] << 24); };
+    if (img.size() < 52 || img[0] != 0x7F || img[1] != 'E' || img[2] != 'L' || img[3] != 'F') {
+        std::fprintf(stderr, "bukan ELF: %s\n", path); exit(2);
+    }
+    const u32 entry = rd32(24), phoff = rd32(28), phentsize = rd16(42), phnum = rd16(44);
     eebus::reset();
-    eebus::mem_write(vaddr, buf.data(), filesz);
+    u32 loaded = 0;
+    for (u32 i = 0; i < phnum; i++) {
+        size_t o = phoff + (size_t)i * phentsize;
+        if (o + 32 > img.size()) break;
+        const u32 p_type = rd32(o), p_off = rd32(o + 4), p_vaddr = rd32(o + 8);
+        const u32 p_filesz = rd32(o + 16), p_memsz = rd32(o + 20);
+        if (p_type != 1 || !p_filesz) continue;                       // PT_LOAD saja
+        if (p_off + p_filesz > img.size() || p_vaddr + p_memsz > eebus::RAM_SIZE) {
+            std::fprintf(stderr, "segmen di luar jangkauan: off=0x%x vaddr=0x%x filesz=0x%x\n", p_off, p_vaddr, p_filesz);
+            exit(2);
+        }
+        eebus::mem_write(p_vaddr, img.data() + p_off, p_filesz);
+        loaded++;
+    }
+    std::fprintf(stderr, "[elf] %s entry=0x%08x segmen=%u\n", path, entry, loaded);
+    return entry;
 }
 
 // region label buat hot-PC (snapshot ELF verified: .text 0x100000..0x3bbf20,
@@ -293,7 +346,7 @@ int main(int argc, char** argv) {
     u64 cap = argc > 2 ? std::strtoull(argv[2], nullptr, 10) : 50'000'000'000ull;
     u32 trace_dump = argc > 3 ? (u32)std::strtoul(argv[3], nullptr, 10) : 0; // n PC terakhir utk dump
     static u32 g_trace[1u << 16];    // ring 64K PC (diagnosis spin loop)
-    load_elf_into_bus(elf);
+    const u32 elf_entry = load_elf_into_bus(elf);
     eekern::sif_regs_reset();        // Phase 7b.9: state "IOP siap" (reg4=0x20000)
     sifrpc::reset();                 // Phase 8: registry server host + statistik
     sifrpc::install_defaults();      // fileio/pad/cdvd/mcserv
@@ -312,7 +365,7 @@ int main(int argc, char** argv) {
     // FULL crt0 dari entry ELF (0x100008): heap-clear -> SetupThread/SetupHeap (60->61)
     // -> walk ROM-handler -> install exception -> main wrapper. PASS = 60,61 berurutan.
     // (Sebelumnya start 0x31db70 = skip crt0; kriteria 60->61 tak pernah tercapai — fix sesi cron #8.)
-    cpu.reset(0x100008);  // ELF entry asli (verified: entry 0x100008, Phase 1a)
+    cpu.reset(elf_entry);  // entry dari ELF header (retail & proto JP sama-sama 0x100008)
     cpu.set_sp(0x01FFFF00);                    // boot stack: top RAM valid (0x02000000 & MASK = 0!)
     cpu.set_gp(0x0063fd48);                    // gp dari crt0: lui a0,0x47; addiu a0,-29456
     cpu.hist = g_hist;
@@ -348,6 +401,21 @@ int main(int argc, char** argv) {
                          dash == std::string::npos ? 0 : (u32)std::strtoul(ww.substr(dash + 1).c_str(), nullptr, 0));
         if (const char* cap = std::getenv("GH_WATCH_CAP")) eebus::g_watch_cap = std::strtoull(cap, nullptr, 0);
     }
+    // Phase 12: GH_POKE="addr:val:at[,addr:val:at...]" — tulis 64-bit sekali pada inst ke-at.
+    if (const char* pk = std::getenv("GH_POKE")) {
+        std::string all(pk); size_t pos = 0;
+        while (pos < all.size() && cpu.poke_n < 4) {
+            size_t c1 = all.find(',', pos);
+            std::string it = all.substr(pos, c1 == std::string::npos ? std::string::npos : c1 - pos);
+            unsigned long a = 0, v = 0; unsigned long long at = 0;
+            char extra = 0;
+            if (std::sscanf(it.c_str(), "%li:%li:%llu%c", &a, &v, &at, &extra) >= 3) {
+                cpu.poke[cpu.poke_n++] = eecpu::Cpu::Poke{(u32)a, (u32)v, (u64)at, false};
+            }
+            if (c1 == std::string::npos) break;
+            pos = c1 + 1;
+        }
+    }
     if (const char* w = std::getenv("GH_TRACE_WINDOW")) {
         std::string ww(w); size_t dash = ww.find('-');
         cpu.trace_lo = (u32)std::strtoul(ww.substr(0, dash).c_str(), nullptr, 0);
@@ -376,6 +444,23 @@ int main(int argc, char** argv) {
                          t.finished ? "/finished" : "", t.pc, (unsigned long long)t.inst);
         }
         std::fprintf(stderr, "\n");
+    }
+    {   // Phase 12: unwind kasar — cari return address .text di stack tiap thread
+        auto dump = [](int tid, u32 pc, u32 sp) {
+            std::fprintf(stderr, "[stack] t%d pc=%08x sp=%08x:", tid, pc, sp);
+            int n = 0;
+            for (u32 off = 0; off < 0x200 && n < 12; off += 8) {
+                u32 v = eebus::read32(sp + off);
+                if (v >= 0x00100000u && v < 0x003BC000u) { std::fprintf(stderr, " +%03x=%08x", off, v); n++; }
+            }
+            std::fprintf(stderr, "\n");
+        };
+        dump(0, cpu.pc, cpu.r[29][0]);
+        for (int i = 1; i < eecpu::MAX_EE_THREADS; i++) {
+            const auto& t = eecpu::g_threads.t[i];
+            if (!t.used || t.finished) continue;
+            dump(i, t.pc, t.ctx.r[29][0]);
+        }
     }
     if (cpu.halt_hits) {
         std::fprintf(stderr, "[HALT] pc=0x%08x hits=%llu instret=%llu\n",
@@ -433,6 +518,22 @@ int main(int argc, char** argv) {
             for (u32 a = p; a < p + 0x100; a += 4) n += g_hist[a >> 2];
             if (n) std::fprintf(stderr, "  %08x %llu\n", p, (unsigned long long)n);
         }
+    }
+
+    // Phase 12: hit count eksak utk alamat yang diminta (GH_PCCOUNT=0xADDR,0xADDR,...)
+    if (const char* pc = std::getenv("GH_PCCOUNT")) {
+        std::string r(pc); size_t i = 0;
+        std::fprintf(stderr, "[pccount]");
+        while (i < r.size()) {
+            size_t j = r.find(',', i); if (j == std::string::npos) j = r.size();
+            std::string tok = r.substr(i, j - i);
+            if (!tok.empty()) {
+                u32 a = (u32)std::strtoul(tok.c_str(), nullptr, 0);
+                std::fprintf(stderr, " %08x=%llu", a, (unsigned long long)g_hist[a >> 2]);
+            }
+            i = j + 1;
+        }
+        std::fprintf(stderr, "\n");
     }
 
     // top-12 hot PC (sort: count desc, lalu alamat asc -> deterministik)
@@ -535,6 +636,16 @@ int main(int argc, char** argv) {
                     (unsigned long long)d.payload_bytes,
                     (unsigned long long)d.reply_bytes, d.last_cid, d.last_server, d.last_func,
                     (int)d.last_result);
+        {
+            auto& cs = sifdma::census();
+            std::printf("rpc-census distinct=%zu:", cs.size());
+            for (size_t i = 0; i < cs.size() && i < 14; i++)
+                std::printf(" %08x/%u=%llu(p%u,r%u,res%d,cd%08x)", cs[i].sid, cs[i].fno,
+                            (unsigned long long)cs[i].n, cs[i].last_pay, cs[i].last_rep,
+                            (int)cs[i].last_res, cs[i].last_cd);
+            std::printf("\n            rpc-caller: %s\n", sifdma::caller_csv().c_str());
+            std::printf("            sys-pc: %s\n", eecpu::sys_pc_csv().c_str());
+        }
         std::printf("cdvd-ee: read_ok=%llu read_fail=%llu bytes=%llu fno_lain=%llu\n",
                 (unsigned long long)sifrpc::cdvd_read_ok(),
                 (unsigned long long)sifrpc::cdvd_read_fail(),
@@ -590,6 +701,15 @@ int main(int argc, char** argv) {
                     (unsigned long long)g_gif.kicks, (unsigned long long)g_gif.qwords,
                     (unsigned long long)g_gif.tags, (unsigned long long)g_gif.actions,
                     (unsigned long long)g_gif.bad);
+        std::fprintf(stderr, "            gif-adstream: pkts=%llu recs=%llu addr_bad=%llu addr:",
+                     (unsigned long long)g_gif.ad_pkts, (unsigned long long)g_gif.ad_recs,
+                     (unsigned long long)g_gif.ad_addr_bad);
+        for (int i = 0; i < g_gif.ad_addr_n; i++) std::fprintf(stderr, " %02x", g_gif.ad_addr[i]);
+        std::fprintf(stderr, "\n");
+        std::fprintf(stderr, "            mmio-write: %s\n", eebus::mmio_csv().c_str());
+        std::fprintf(stderr, "            mmio-pc 9000=%s\n", eebus::mmio_pc_csv(0x10009000).c_str());
+        std::fprintf(stderr, "            mmio-pc e010=%s e020=%s\n", eebus::mmio_pc_csv(0x1000e010).c_str(), eebus::mmio_pc_csv(0x1000e020).c_str());
+        std::fprintf(stderr, "            gif-writer chcr=%s madr=%s qwc=%s tadr=%s\n", eebus::mmio_pc_csv(0x1000a000).c_str(), eebus::mmio_pc_csv(0x1000a010).c_str(), eebus::mmio_pc_csv(0x1000a020).c_str(), eebus::mmio_pc_csv(0x1000a030).c_str());
         std::printf("bus: kicks=%llu qwords=%llu chcr_polls=%llu vif_polls=%llu mmio_other=%llu"
                     " last{madr=0x%x qwc=%u chcr=0x%x tte=%d}\n",
                     (unsigned long long)bs.kicks, (unsigned long long)bs.qwords,

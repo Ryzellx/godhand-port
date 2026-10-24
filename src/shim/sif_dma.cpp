@@ -7,6 +7,7 @@
 #include "ee_cpu.h"
 #include "ee_kernel.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <map>
@@ -37,6 +38,22 @@ constexpr u32 SD_STRUCT = 0x00F00000u;                                  // EE (c
 constexpr u32 SD_BUF = 0x00110000u, SD_CBUF = 0x00120000u;              // IOP (2 MB)
 constexpr u32 SD_SIZE = 0x10000u;
 std::map<u32, u32> g_cd_server;
+// Phase 12 — census (sid,fno) -> hitungan. Insertion order disimpan supaya CSV stabil.
+struct CensusRec { u32 sid, fno; u64 n; u32 pay, rep; s32 res; u32 pc; u32 cd; };
+std::vector<CensusRec> g_census;
+std::map<u64, size_t> g_census_ix;
+std::map<u32, u64> g_caller;   // ra pemanggil syscall -> jumlah (provenance)
+void census_note(u32 sid, u32 fno, u32 pay, u32 rep, s32 res, u32 pc, u32 cd) {
+    u64 key = ((u64)sid << 32) | fno;
+    auto it = g_census_ix.find(key);
+    if (it == g_census_ix.end()) {
+        g_census_ix[key] = g_census.size();
+        g_census.push_back({sid, fno, 1, pay, rep, res, pc, cd});
+    } else {
+        CensusRec& r = g_census[it->second];
+        r.n++; r.pay = pay; r.rep = rep; r.res = res; r.pc = pc; r.cd = cd;
+    }
+}
 bool g_autostub = true;   // auto-bind stub utk sid tanpa backend      // SifRpcClientData* -> sid (dari BIND)
 u32 g_sreg[16]{};                    // SifCmdSRegData index/value (SET_SREG)
 
@@ -135,7 +152,7 @@ void finish_request(u32 pkt_addr, u32 cd, u32 extra_cid, u32 sd, u32 buf, u32 cb
 
 const Stats& stats() { return g_st; }
 
-void reset() {
+void reset() { g_census.clear(); g_census_ix.clear(); g_caller.clear();
     g_iop.clear();
     g_st = Stats{};
     g_last_id = 0;
@@ -272,6 +289,12 @@ u32 kick(u32 sdd_addr, u32 count) {
                         if (s_id == 0x80000593u && f == 12u) {
                             if (const char* e = std::getenv("GH_STUB593")) v = (u32)std::strtoul(e, nullptr, 0);
                         }
+                        // Phase 12: 0x19720317 = server streaming media (bind di 0x375860, 18 bind/call
+                        // per frame dari 0x3758E8). Tanpa backend balasannya 0 -> pemutar media
+                        // menunggu data selamanya. GH_STUB1972 = nilai word0 balasan (A/B).
+                        if (s_id == 0x19720317u) {
+                            if (const char* e = std::getenv("GH_STUB1972")) v = (u32)std::strtoul(e, nullptr, 0);
+                        }
                         rep.assign(4, 0);
                         rep[0] = (u8)v; rep[1] = (u8)(v >> 8); rep[2] = (u8)(v >> 16); rep[3] = (u8)(v >> 24);
                         return 0;
@@ -363,6 +386,8 @@ u32 kick(u32 sdd_addr, u32 count) {
                 reply.clear();
             }
             g_st.last_result = (u32)result;
+            g_caller[eecpu::g_syscall_ra]++;
+            census_note(sid, fno, (u32)payload.size(), (u32)reply.size(), result, eecpu::g_syscall_pc, cd);
             // DMA balik IOP->EE: server CD (cdvdfsv) menulis struct hasil langsung ke
             // buffer client di EE (paket menyimpan pointer-nya di +292). Tanpa ini klien
             // membaca nol dan menganggap file gagal dibuka walau reply-nya benar.
@@ -435,4 +460,39 @@ u32 kick(u32 sdd_addr, u32 count) {
     return ++g_last_id;
 }
 
+
+const std::vector<Hit>& census() {
+    static std::vector<Hit> out;
+    out.clear();
+    out.reserve(g_census.size());
+    for (auto& r : g_census) out.push_back(Hit{r.sid, r.fno, r.n, r.pay, r.rep, r.res, r.pc, r.cd});
+    std::sort(out.begin(), out.end(), [](const Hit& a, const Hit& b) {
+        return a.n != b.n ? a.n > b.n : (a.sid != b.sid ? a.sid < b.sid : a.fno < b.fno);
+    });
+    return out;
+}
+std::string census_csv() {
+    std::string s;
+    for (auto& h : census()) {
+        char b[128];
+        std::snprintf(b, sizeof b, "%08x/%u=%llu pay=%u rep=%u res=%d pc=%08x cd=%08x; ",
+                      h.sid, h.fno, (unsigned long long)h.n, h.last_pay, h.last_rep,
+                      (int)h.last_res, h.last_pc, h.last_cd);
+        s += b;
+    }
+    return s;
+}
+
+std::string caller_csv() {
+    std::vector<std::pair<u64, u32>> v;
+    v.reserve(g_caller.size());
+    for (auto& kv : g_caller) v.push_back({kv.second, kv.first});
+    std::sort(v.begin(), v.end(), [](auto& a, auto& b) { return a.first != b.first ? a.first > b.first : a.second < b.second; });
+    std::string s;
+    for (size_t i = 0; i < v.size() && i < 8; i++) {
+        char b[48]; std::snprintf(b, sizeof b, "%08x=%llu; ", v[i].second, (unsigned long long)v[i].first);
+        s += b;
+    }
+    return s;
+}
 } // namespace sifdma

@@ -147,3 +147,24 @@ delay-slot (terukur: memset `0x3A5364` jatuh ke loop byte `a2=0xFFFF8310`).
 - **`0x398580` bukan CD end-func data**, tapi wrapper generik: `[ctx+0]`=head_len → salin
   `ctx+0x10` → `[ctx+8]`; `[ctx+4]`=tail_len → salin `ctx+0x50` → `[ctx+0xC]`; lalu `0x3984D8`
   (simpan hasil ke `0x3F8680`, `iSignalSema(0x3F8678)`). Untuk read sektor penuh head/tail = 0.
+
+### 7.4 Provenance & paket GS nyata (Phase 12, 2026-10-24)
+
+- **Paket GS dari game terdeteksi** (400 M): helper `0x396DC0` = `sceGifPkSend`-style, `QWC = header+1`;
+  tag `{nloop=22, eop=1, flg=PACKED, NREG=0, REGS[0]=0xE}` + 22 record 16 B `{data,addr}`.
+  Alamat nyata: `0x18 XYOFFSET_1 · 0x1A PRMODECONT · 0x40 SCISSOR_1 · 0x45 TEXA · 0x46 FOGCOL ·
+  0x47 SCANMSK · 0x4C FRAME_1 · 0x4E ZBUF_1`. 2.305 paket / 50.710 record, nol addr > 0x7F.
+  **NREG=0 di tag ini berarti 1 register**, bukan 16 (manual vs data) → `parse_stream` diberi aturan
+  fallback `nreg = avail_qwords/nloop` hanya saat tafsir 16-reg tidak muat.
+- **Kick 16.384 pertama** (`0x395780`, QWC=6, 96 B) nyaris nol → itu flush/blank, bukan geometri.
+- **Peta MMIO yang ditulis** (400 M): `A000/A010/A020/A030` (GIF) 37.379/35.074/37.378/2.306 ·
+  `F000` 5.388 (INTC) · `9000` 4.611 · `9010/9020/9030` nol/2.306/2.306 · `E010/E020` 2.306/2.306 ·
+  `7010..701C` 10 · `2000` 6 · `F590` 4. **Nol tulis ke `0x10005000` (VIF1) / `0x11000000` (VU1)**.
+- **Gate worker ADXF**: `0x3C8158` (bukan `0x3D0000`). Bukti A/B: poke `0x3C8158`→ t2 exit + t0 pindah
+  `0x14FEC0`→`0x2B4BC8`; poke `0x3D0000`→ nol perubahan byte-per-byte. `0x3257C8` (init 6 flag) **0×**,
+  `0x325B90` (teardown) **0×**, `0x3252F8` (status→DeleteThread) **5.402×** sepanjang 400 M.
+- **Blok MMIO belum dipetakan**: `0x10009000`/`0x1000E010`/`0x1000E020` penulisnya satu fungsi
+  `0x31A5A0..0x31A5F0` (dipanggil frame `0x30AF78` → `0x31A338`/`0x31A538`); pola tulis
+  {2→+0x10,+0x20; 0→0x9020; data→0x9030; 0x45,0x145→0x9000}. Bukan GIF/VIF — belum diidentifikasi.
+- **Alat**: `GH_POKE=addr:val:at`, `GH_PCCOUNT` + `GH_HIST_EXACT=1`, `[stack]` unwind per thread,
+  `rpc-census`/`rpc-caller`/`sys-pc`, `mmio-write`/`gif-writer`, loader ELF generik (retail + proto JP).

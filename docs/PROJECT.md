@@ -762,3 +762,65 @@ salin dari `ctx+0x50` ke `[ctx+0xC]`; lalu lompat `0x3984D8` (simpan hasil + `iS
 **Floor 5× (md5 stdout identik, semua PASS):** `sif 41/41` 73372ce0 · `sif_dma 11/11` 435566a1 ·
 `shim cc2ea3b0` · `bus 20/20 a06a36af` · `mmi 25/25 accd196e` · `gif ade54fea` · `iso 18/18 e8332a85` ·
 `crt0 30 M b2c37ecb / 200 M 3b9380b0 / 400 M fc52f27f`, semua `stop=clean-cap`, nol fault.
+
+### LOG 2026-10-24 #22 (Phase 12: trafik GS NYATA akhirnya ter-decode — 50.710 tulis register; instrumentasi provenance)
+
+**Instrumentasi baru (diagnosa ke stderr; stdout tetap deterministik):**
+- `rpc-census` per `(sid,fno)` — hitungan + payload/reply terakhir + `cd` + pc; `rpc-caller` (ra syscall 119);
+  `sys-pc` (`num@pc=n(ra)`) — provenance jalur RPC tanpa tebakan.
+- `mmio-write` census alamat MMIO yang ditulis + `gif-writer` (pc penulis CHCR/MADR/QWC/TADR).
+- `[stack] tN pc sp` — unwind kasar: return address `.text` di 0x200 B pertama stack tiap thread.
+- `GH_POKE="addr:val:at[,…]"` — poke 64-bit terjadwal (A/B gate flag); `GH_PCCOUNT` + `GH_HIST_EXACT=1` (hit eksak).
+- **Loader ELF generik** — baca ELF32 header, muat semua `PT_LOAD`, `memsz` = bss, entry dari header.
+  Retail `SLUS_215.03` dan proto JP `SLPM_665.50` dua-duanya `entry=0x100008` (ukuran tak lagi dipaku).
+
+**A/B gate thread ADXF (`0x324EB0` = entry t2):**
+```
+0x324EB0: if (*(u64*)0x3C8158) goto done;          // flag berhenti
+0x324ED8: loop { counter(0x3C8100)++; if (*(u64*)0x3D0000) break; }
+done:     *(u64*)0x3C8160 = 1;                     // ack
+```
+| Poke @inst 20 M | Hasil terukur |
+|---|---|
+| `0x3D0000 = 1` | **nol perubahan** (400 M metrik identik) → hipotesis gate **falsified** |
+| `0x3C8158 = 1` | t2 **exit** (`exits=1`), t0 pindah `0x14FEC0` → `0x2B4BC8`, RPC 593/12 350 → 618 |
+- Penulis flag: `0x3257C8` (set 6 flag `0x3C8158..0x3C81A8`=1) **0 eksekusi** sepanjang 400 M; teardown
+  `0x325B90` juga **0**. Yang jalan hanya `0x3252F8` (status→DeleteThread) **5.402×**. Jadi worker ADXF
+  memang idle menunggu `0x3D0000`; game tidak pernah memanggil init/stop yang kita kira.
+
+**TEMUAN UTAMA — GS sudah bicara, parser kita yang menolak:**
+- 16.384 kick pertama (`0x395780`) = paket 96 B (QWC=6) hampir nol (bukan geometri).
+- Mulai **kick #16385**, helper `0x396DC0` mengirim paket 368 B (QWC = header+1 = 23): tag
+  `{nloop=22, eop=1, pre=0, flg=PACKED, NREG=0, REGS[0]=0xE (A+D)}` + 22 record 16 B `{data, addr}`.
+- Alamat yang terbaca: **0x4C FRAME_1 · 0x4E ZBUF_1 · 0x18 XYOFFSET_1 · 0x40 SCISSOR_1 · 0x1A PRMODECONT ·
+  0x45/0x46/0x47 (TEXA/FOGCOL/SCANMSK)** — register GS sungguhan; 400 M: **2.305 paket / 50.710 record /
+  0 alamat di luar 0x7F** (diukur via counter fallback sebelum fix).
+- **Fix:** `gif::parse_stream` — bila `flg=PACKED & NREG=0` dan tafsir 16-reg **tidak muat** di sisa buffer,
+  pakai `nreg = avail_qwords / nloop` (hanya kalau habis dibagi; paket valid tak tersentuh). Tag game ini
+  menulis NREG=0 untuk 1 register — manual bilang 16, data bilang 1.
+- Hasil: `gif: kicks=18.689 tags=18.689 actions=50.710 bad=0` (sebelumnya `actions=0 bad=2.305`).
+  `gif_test` tetap 6/6 md5 `ade54fea` → semantik parser unit-test tidak berubah.
+
+**VU1 belum tersentuh (census MMIO 400 M):** nol tulis ke `0x10005000` (VIF1) / `0x11000000` (memori VU1).
+Yang ada: `0x1000A000/A010/A020/A030` (GIF) 37.379/35.074/37.378/2.306 · `0x1000F000` 5.388 (INTC) ·
+`0x10009000` 4.611 · `0x1000E010/E020` 2.306 · `0x10009020/9030` 2.306/2.306. Provenance penulis blok
+`0x10009000`/`0x1000E000`: **`0x31A5A0..0x31A5F0`** (satu fungsi, dipanggil dari frame `0x30AF78` →
+`0x31A338`/`0x31A538`), pola {2 → +0x10 dan +0x20; 0 → 0x9020; data → 0x9030; 0x45 lalu 0x145 → 0x9000}.
+Blok ini **belum dipetakan** di `ee_bus` (bukan GIF/VIF: alamat & pola beda) — dicatat sebagai kandidat
+blok kontrol 4-register (sound/DMA), bukan diklaim.
+
+**Proto JP bisa diboot sekarang** (`SLPM_665.50`): 30 M instruksi, `stop=clean-cap`, nol fault, tapi berhenti
+di loop `FindAddress` (syscall **131 × 2.025.777**) memindai `0x80000000..0x80080000` = **IOP RAM** yang
+tidak kita modelkan → retail & proto konvergen ke gap yang sama: modul IOP tak hadir di memori.
+
+**Angka `crt0_test 400 M`:** Read_EE 10 ok / 370.688 B · RPC 8.406 call (593/12 = **5.988**, 19720317/2 = 2.305)
+· GIF 18.689 kick / 151.319 qword / **50.710 aksi AD** / 0 bad · INTC 3 handler 5.922 fired · VU0 macro 29.307
+· sched 57.370 switch (t0 167,7 M · t2 177,9 M).
+
+**Floor 5× hijau (md5 stdout identik):** sif `73372ce0` · sif_dma `435566a1` · shim `cc2ea3b0` · bus `a06a36af`
+· mmi `accd196e` · gif `ade54fea` · iso `e8332a85` · crt0 30 M `5ac7275e` / 200 M `c5c11e24` / 400 M `7c44ed47`
+· proto JP 30 M `da34a247`, semua `stop=clean-cap`, nol fault.
+
+**Belum (urut kerja):** (a) petakan `0x10009000` & `0x1000E000` (2.306 tulis/paket — kandidat DMA/VIF);
+(b) model memori IOP `0x80000000..0x80080000` (FindAddress/IRX lookup + loadfile fno=6);
+(c) VU1/VIF1 = syarat geometri retail (belum satu tulis pun).
