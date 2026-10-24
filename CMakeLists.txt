@@ -71,8 +71,9 @@ add_executable(crt0_test
   src/shim/host_io.cpp
   src/shim/sif_rpc.cpp
   src/shim/sif_dma.cpp
-  src/shim/memcard.cpp)
-target_include_directories(crt0_test PRIVATE src/shim)
+  src/shim/memcard.cpp
+  src/gif/gif.cpp)
+target_include_directories(crt0_test PRIVATE src/shim src/gif)
 find_package(Threads REQUIRED)
 target_link_libraries(crt0_test PRIVATE Threads::Threads)
 

@@ -255,6 +255,17 @@ decoder ADX. Semua angka di bawah dari run nyata, bukan klaim.
 - Sink: data dibuang (setara /dev/null) + `write_wav()` untuk export. Belum ada mixing/DSP
   dan belum disambung ke sifrpc server sound (menunggu identifikasi sid 0x80000006/0x80000592).
 
+**4b) Phase 7c readiness — sudah ada kick DMA ch2 dari kode GAME (bukan test)**
+
+`crt0_test` sekarang memasang hook `eekern::set_gif_kick` yang mengalirkan packet DMA ch2
+nyata ke parser produksi `gif::parse_stream` (yang unit-test 6/6) dan mencetak census.
+Hasil 400M: `bus: kicks=16384 qwords=98304 chcr_polls=49152 vif_polls=0 mmio_other=49250
+last{madr=0x1fffe50 qwc=6 chcr=0x0 tte=0}` dan `gif: kicks=16384 tags=16384 actions=0 bad=0`,
+5/5 identik. **Tafsir jujur:** 16.384 = batas retry konstan (0x4000) dan isi packet-nya tag
+NOL (nloop=0, egl=0) — jadi ini loop "kick + Deci2Call" yang gagal, bukan render nyata.
+Bukti positifnya: rantai game→MMIO→sink→parser tersambung tanpa crash (bad=0) dan parser
+menerima setiap kick. Render nyata menunggu wall sound di atas lewat.
+
 **5) Test floor** (semua PASS, 5× berturut kecuali disebut): gif_test · shim_test · bus_test ·
 sif_test 31/31 · sif_dma_test 10/10 · adx_test (3 varian) · godhand_slice (setarch -R, rc=0) ·
 crt0_test 2 B inst deterministik (md5 644fa8b7…).
@@ -327,7 +338,7 @@ suara EE (state PS2RNA/SJUNI), bukan di SIF. Untuk lanjut perlu model objek SJUN
 stub. Ini pekerjaan Phase 9, bukan Phase 8.
 
 **5) Test floor** (semua PASS, 5× berturut, 2026-10-24): gif_test (6/6) · shim_test (ALL PASS) ·
-bus_test (ALL PASS) · sif_test 36/36 (naik dari 31: +5 test backend baru) · sif_dma_test 10/10 · crt0_test 400M (deterministik 5/5) ·
+bus_test (ALL PASS) · census GIF ch2 di crt0 (16.384 kick, 0 bad parse) · sif_test 36/36 (naik dari 31: +5 test backend baru) · sif_dma_test 10/10 · crt0_test 400M (deterministik 5/5) ·
 adx_test 3 varian (2ch/48 kHz dari ISO: 96.224 sampel/ch, 2,005 s) · godhand_slice
 `setarch -R` rc=0.
 

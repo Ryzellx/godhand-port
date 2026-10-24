@@ -8,6 +8,7 @@
 #include "ee_kernel.h"
 #include "sif_rpc.h"
 #include "sif_dma.h"
+#include "gif.h"
 #include "memcard.h"
 #include <cstdio>
 #include <cstdlib>
@@ -30,6 +31,34 @@ static u64 g_sema_autosig = 0;         // WaitSema auto-signal (virtual INTC eve
 // shim syscall — mapping ke eekern (kontrak dari syscall_contract.csv)
 static eekern::SemaParam g_sp;
 static s32 g_sema = -1;
+// Phase 7c readiness — packet GIF NYATA dari kode game (DMA ch2) diumpankan ke parser
+// produksi (`gif::parse_stream`, unit-test 6/6). Yang diukur: berapa kick, berapa tag,
+// berapa aksi ter-normalisasi, dan berapa paket yang gagal parse. Nol render di sini —
+// hanya bukti bahwa rantai game->DMA->parser tersambung tanpa emulator.
+struct GifCensus { u64 kicks = 0, tags = 0, actions = 0, bad = 0, qwords = 0; };
+static GifCensus g_gif;
+
+static void gif_kick_census(const void* packet, u32 qwc) {
+    if (g_gif.kicks < 2 && std::getenv("GH_GIF_DUMP")) {
+        const u8* b = (const u8*)packet;
+        std::fprintf(stderr, "[gif] kick qwc=%u:", qwc);
+        for (u32 i = 0; i < qwc * 16u; i++) std::fprintf(stderr, "%02x", b[i]);
+        std::fprintf(stderr, "\n");
+    }
+    g_gif.kicks++;
+    g_gif.qwords += qwc;
+    const u8* buf = (const u8*)packet;
+    size_t off = 0, len = (size_t)qwc * 16;
+    while (off + 16 <= len) {
+        std::vector<gif::Action> acts;
+        size_t used = 0;
+        if (!gif::parse_stream(buf + off, len - off, acts, &used) || used == 0) { g_gif.bad++; break; }
+        g_gif.tags++;
+        g_gif.actions += acts.size();
+        off += used;
+    }
+}
+
 static bool sys_handler(u32 num, u32 a0, u32 a1, u32 a2, u32 a3, u32& v0) {
     if (num < 160) g_census[num]++; else g_census_oob++;
     switch (num) {
@@ -193,6 +222,7 @@ int main(int argc, char** argv) {
     sifrpc::reset();                 // Phase 8: registry server host + statistik
     sifrpc::install_defaults();      // fileio/pad/cdvd/mcserv
     sifdma::reset();
+    eekern::set_gif_kick(gif_kick_census);
     if (const char* v = std::getenv("GH_SIF_VERBOSE")) sifdma::set_verbose(std::atoi(v));
 
     // sanity: bytes crt0 persis dari disasm (verified): beq v0,v1 @0x100178
@@ -392,6 +422,21 @@ int main(int argc, char** argv) {
         std::printf("pkt raw 0x77EA80:");
         for (int i = 0; i < 12; i++) std::printf(" %08x", eebus::read32(0x0077EA80u + i * 4));
         std::printf("\n");
+    }
+
+    // Phase 7c readiness: apakah kode GAME (bukan test) sudah menulis DMA ch2 sendiri?
+    {
+        const eebus::Stats& bs = eebus::stats();
+        std::printf("gif: kicks=%llu qwords=%llu tags=%llu actions=%llu bad=%llu\n",
+                    (unsigned long long)g_gif.kicks, (unsigned long long)g_gif.qwords,
+                    (unsigned long long)g_gif.tags, (unsigned long long)g_gif.actions,
+                    (unsigned long long)g_gif.bad);
+        std::printf("bus: kicks=%llu qwords=%llu chcr_polls=%llu vif_polls=%llu mmio_other=%llu"
+                    " last{madr=0x%x qwc=%u chcr=0x%x tte=%d}\n",
+                    (unsigned long long)bs.kicks, (unsigned long long)bs.qwords,
+                    (unsigned long long)bs.chcr_polls, (unsigned long long)bs.vif_polls,
+                    (unsigned long long)bs.mmio_other, bs.last_madr, bs.last_qwc, bs.last_chcr,
+                    bs.last_tte ? 1 : 0);
     }
 
     // bukti minimal: SetupThread (60) DAN SetupHeap (61) kena, berurutan
