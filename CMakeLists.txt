@@ -137,7 +137,9 @@ add_executable(sif_test
   src/shim/sif_rpc.cpp
   src/shim/host_io.cpp
   src/shim/memcard.cpp
-  src/shim/iso9660.cpp)
+  src/shim/iso9660.cpp
+  src/shim/ee_bus.cpp
+  src/shim/ee_kernel.cpp)   # cdvd Read_EE menulis langsung ke RAM EE
 target_include_directories(sif_test PRIVATE src/shim)
 
 # adx_test: decoder CRI ADX vs referensi ffmpeg (bit-exact <=1 LSB)

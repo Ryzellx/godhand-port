@@ -3,6 +3,7 @@
 #include "host_io.h"
 #include "memcard.h"
 #include "iso9660.h"
+#include "ee_bus.h"
 #include <algorithm>
 #include <cstring>
 #include <map>
@@ -335,7 +336,14 @@ static s32 cdvfs_handler(u32 func, const std::vector<u8>& req, std::vector<u8>& 
         if (found && !dir) {
             // Field yang TERBUKTI dibaca klien: +4 = ukuran byte. +0 = status (1 = ada),
             // +8 = LBA awal. Field lain nol sampai ada konsumen yang membacanya.
-            info[0] = 1;
+            // Tata letak struct 36 B = CdlFILE: {u32 lsn; u32 size; ...} (ps2sdk).
+            // Bukti A/B pada boot nyata: dengan +0 = flag 1, ADXF meminta Read_EE
+            // lsn=1 (system area) lalu macet; dengan +0 = lba, permintaannya
+            // lsn=2175 nsec=154 — persis \MODULES\IRX.IMS;1 (iso_test: lba 2175,
+            // 314.304 B = 153,5 sektor). Jadi +0 = lsn, bukan flag. Flag "ada"
+            // dibawa nilai balik RPC (= ukuran), bukan field struct.
+            const bool legacy = std::getenv("GH_CDVFS_LEGACY") != nullptr;
+            for (int k = 0; k < 4; k++) { info[0 + k] = (u8)((legacy ? 1u : lba) >> (8 * k)); }
             for (int k = 0; k < 4; k++) { info[4 + k] = (u8)(size >> (8 * k)); }
             for (int k = 0; k < 4; k++) { info[8 + k] = (u8)(lba >> (8 * k)); }
             put32(reply, size ? size : 1);
@@ -354,6 +362,70 @@ static s32 cdvfs_handler(u32 func, const std::vector<u8>& req, std::vector<u8>& 
     g_cdvfs_other++;
     if (std::getenv("GH_CDVFS_DUMP") || std::getenv("GH_SIF_DUMP"))
         std::fprintf(stderr, "[cdvfs] n=%zu (belum dipetakan) name=\"%s\"\n", req.size(), name.c_str());
+    put32(reply, 0);
+    return 0;
+}
+
+
+// ---------------------------------------------------------- cdvd Read_EE (0x595)
+// Ground truth: extract/modules/ioprp/m09.elf (cdvdfsv.irx 33.440 B).
+//   register server : FUN_000044a4 -> FUN_00004bc8(0x58e8, 0x80000595, FUN_00003c1c, ...)
+//   dispatcher      : FUN_00003c1c, string "sce_cdvd N cmd start %d", jump table .data 0x53d0
+//   fno 1           : tabel[0] = 0x3cb4 -> FUN_00001dc4(paket, 24, reply, mode_dvd)
+// Paket 24 B (dibangun klien EE 0x399728; dipanggil dari 0x331830 dan 0x333808):
+//   +0  lsn      +4  nsec     +8  dst_EE   +12 mode[3]+pad
+//   +16 ctx_EE (144 B, = end_param sceSifCallRpc)   +20 out_EE (4 B)
+// Ukuran sektor dari mode[2] (0x1e98..0x1ee4): 1 -> 2328, 2 -> 2340, selain itu 2048.
+// IOP asli menyalin data ke buffer IOP lalu DMA dua kali (0x2630..0x2684):
+//   {0x5780 -> ctx_EE, 144 B} = {prefix, trail, dst, dst+align}; {0x5a18 -> out_EE, 4 B} = byte terkirim.
+// Native: baca langsung dari ISO retail (LSN absolut) dan tulis ke RAM EE di titik yang sama.
+static u64 g_cdvd_read_ok = 0, g_cdvd_read_fail = 0, g_cdvd_read_bytes = 0, g_cdvd_other = 0;
+
+static s32 cdvd_ee_handler(u32 func, const std::vector<u8>& req, std::vector<u8>& reply) {
+    if (func != 1 || req.size() < 24) {
+        // fno lain di server ini belum dipetakan: jangan mengarang hasil.
+        g_cdvd_other++;
+        if (std::getenv("GH_SIF_DUMP") || std::getenv("GH_CDVD_DUMP"))
+            std::fprintf(stderr, "[cdvd_ee] fno=%u n=%zu (belum dipetakan)\n", func, req.size());
+        put32(reply, 0);
+        return 0;
+    }
+    const u32 lsn  = get32(req, 0);
+    const u32 nsec = get32(req, 4);
+    const u32 dst  = get32(req, 8);
+    const u32 ctx  = get32(req, 16);
+    const u32 outp = get32(req, 20);
+    const u8  m2   = req[14];
+    const u32 ss   = (m2 == 1) ? 2328u : (m2 == 2) ? 2340u : 2048u;
+    const u64 total64 = (u64)nsec * ss;
+    const u32 total = (total64 > (u64)(64u << 20)) ? 0u : (u32)total64;   // sanity: <= 64 MB
+    u32 got = 0;
+    if (total) {
+        std::vector<u8> buf(total);
+        got = iso9660::read_sectors(lsn, nsec, buf.data(), ss);
+        if (got) eebus::mem_write(dst & 0x1FFFFFFFu, buf.data(), got);   // IOP juga transfer parsial
+    }
+    // struct 144 B yang di-DMA IOP -> ctx_EE: field yang benar-benar ditulis IOP = 4 word pertama
+    std::vector<u8> info(144, 0);
+    const u32 prefix = (dst & 0x3F) ? 64u : 0u;
+    const u32 main_len = ((dst + got) & ~0x3Fu) - (dst + prefix);
+    const u32 trail = (dst + got) - ((dst + got) & ~0x3Fu);
+    auto p32 = [&](size_t off, u32 v) {
+        info[off] = (u8)v; info[off + 1] = (u8)(v >> 8);
+        info[off + 2] = (u8)(v >> 16); info[off + 3] = (u8)(v >> 24);
+    };
+    p32(0, prefix);                 // s7: byte awal yang dibuang (offset & 63)
+    p32(4, trail);                  // s6: byte ekor setelah blok 64 B terakhir
+    p32(8, dst);                    // alamat tujuan EE
+    p32(12, dst + prefix + main_len);   // batas transfer 64 B terakhir
+    if (ctx) eebus::mem_write(ctx & 0x1FFFFFFFu, info.data(), info.size());
+    if (outp) { u32 v = got; eebus::mem_write(outp & 0x1FFFFFFFu, &v, 4); }
+    if (got == total && total) { g_cdvd_read_ok++; g_cdvd_read_bytes += got; }
+    else g_cdvd_read_fail++;
+    if (std::getenv("GH_SIF_DUMP") || std::getenv("GH_CDVD_DUMP")) {
+        std::fprintf(stderr, "[cdvd_ee] Read_EE lsn=%u nsec=%u ss=%u dst=0x%08x -> %u/%u B ctx=0x%08x out=0x%08x\n",
+                     lsn, nsec, ss, dst, got, total, ctx, outp);
+    }
     put32(reply, 0);
     return 0;
 }
@@ -556,11 +628,17 @@ void install_defaults() {
     bind(SRV_FILEIO, "fileio", fileio_handler);
     bind(SRV_CDVD, "cdvd", cdvd_handler);
     bind(SRV_CDVDFS, "cdvdfsv", cdvfs_handler);
+    bind(SRV_CDVD_EE, "cdvd_ee", cdvd_ee_handler);
     bind(SRV_MCSERV, "mcserv", mcserv_handler);
     bind(SRV_PAD, "pad", pad_handler);
     bind(SRV_LOADFILE, "loadfile", loadfile_handler);
     bind(SRV_IOPHEAP, "iopheap", iopheap_handler);
     bind(SRV_SJX, "sjx", sjx_handler);
 }
+
+u64 cdvd_read_ok() { return g_cdvd_read_ok; }
+u64 cdvd_read_fail() { return g_cdvd_read_fail; }
+u64 cdvd_read_bytes() { return g_cdvd_read_bytes; }
+u64 cdvd_other_calls() { return g_cdvd_other; }
 
 } // namespace sifrpc

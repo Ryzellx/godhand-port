@@ -417,11 +417,12 @@ int main(int argc, char** argv) {
     // Phase 8 — bukti jalur SIF DMA -> RPC host (angka dari paket nyata)
     {
         const sifdma::Stats& d = sifdma::stats();
-        std::printf("sifdma: kicks=%llu entries=%llu ee2iop=%llu(%llu B) iop2ee=%llu(%llu B) endfunc_queued=%llu\n",
+        std::printf("sifdma: kicks=%llu entries=%llu ee2iop=%llu(%llu B) iop2ee=%llu(%llu B) endfunc_queued=%llu stat_pending=%llu stat_retired=%llu\n",
                     (unsigned long long)d.kicks, (unsigned long long)d.entries,
                     (unsigned long long)d.ee2iop, (unsigned long long)d.ee2iop_bytes,
                     (unsigned long long)d.iop2ee, (unsigned long long)d.iop2ee_bytes,
-                    (unsigned long long)d.cb_queued);
+                    (unsigned long long)d.cb_queued,
+                    (unsigned long long)d.stat_pending, (unsigned long long)d.stat_retired);
         std::printf("sifcmd: init=%llu reset=%llu sreg=%llu bind=%llu call=%llu end=%llu other=%llu short=%llu\n",
                     (unsigned long long)d.cid_init, (unsigned long long)d.cid_reset,
                     (unsigned long long)d.cid_sreg,
@@ -436,7 +437,12 @@ int main(int argc, char** argv) {
                     (unsigned long long)d.payload_bytes,
                     (unsigned long long)d.reply_bytes, d.last_cid, d.last_server, d.last_func,
                     (int)d.last_result);
-        std::printf("cdvfs: open_ok=%llu open_miss=%llu other=%llu\n",
+        std::printf("cdvd-ee: read_ok=%llu read_fail=%llu bytes=%llu fno_lain=%llu\n",
+                (unsigned long long)sifrpc::cdvd_read_ok(),
+                (unsigned long long)sifrpc::cdvd_read_fail(),
+                (unsigned long long)sifrpc::cdvd_read_bytes(),
+                (unsigned long long)sifrpc::cdvd_other_calls());
+    std::printf("cdvfs: open_ok=%llu open_miss=%llu other=%llu\n",
                     (unsigned long long)sifrpc::cdvfs_open_ok(),
                     (unsigned long long)sifrpc::cdvfs_open_miss(),
                     (unsigned long long)sifrpc::cdvfs_other_calls());

@@ -70,13 +70,26 @@ Sumber: ELF verified + 6146 fungsi decompiled + disasm 714K baris + syscall inve
 | 0x80000003 | iopheap (sceSifAllocIopHeap/Free) | wrapper 0x3b5968 (fno 1) & 0x3b59d8 (fno 2) |
 | 0x80000006 | loadfile (IOPRP ROMDIR idx 12) | fno 255 = word "3100"; fno 0 = LoadModule, 7 modul nyata |
 | 0x80000701 | belum dikenal (autostub) | bind setelah cri_adxi dimuat |
-| 0x80000592 | libsd (audio) | bind awal CRT, 2× |
+| 0x80000592 | cdvdman/cdvdfsv (libcdvd) | bind awal CRT; fno 0 = init (4 B → 16 B) di 0x399168 |
+| 0x80000595 | **cdvd_ee (Read_EE)** — server kedua cdvdfsv.irx | IOPRP310 `m09.elf`: reg `FUN_000044a4`, dispatcher `FUN_00003c1c` (jump table .data 0x53d0). fno 1 → `FUN_00001dc4` |
+| 0x80000597 | cdvdfsv (file system disc) | `m09.elf` reg `FUN_000044a4` → handler 0x7AC; dispatch menurut **panjang paket** (300 = open) |
 | 0x90000200 | SJX/CRI sound (PS2RNA) | fno = 0x400\|opcode; op 0x02 DTX, 0x22 SJUNI_CreateRmt |
 | 0x19720317 | tag internal game (bukan SID IOP) | immediate di 0x375874, dipakai objek async 0x3b2f48 |
 
 Catatan model: `cd` (SifRpcClientData) game = {+0 pkt_addr, +4 rpc_id, +8 sema_id, +20 buf,
 +24 cbuf, +36 server}. `rec_id` bit0 = request aktif, bit1 = selesai (dibuktikan `is_busy()`
 @0x3b3328). Paket `sifcmd` EE→IOP didecode dari salinan RAM IOP (dua-pass kick).
+
+### 7.1 Read_EE (SID 0x80000595 fno 1) — kontrak terukur boot 2026-10-24
+
+- Paket 24 B (klien EE 0x399728): `{u32 lsn; u32 nsec; u32 dst_EE; u8 mode[3]; u8 pad;
+  u32 ctx_EE; u32 out_EE}`. `mode[2]` = ukuran sektor: 0 → 2048, 1 → 2328, 2 → 2340.
+- IOP men-DMA **ctx 144 B** ke `ctx_EE` = `{u32 prefix; u32 trail; u32 dst; u32 dst+prefix+main}`
+  dan **4 B** ke `out_EE` = jumlah byte. `end_func` RPC (0x3A8580 untuk jalur ini) jalan setelahnya.
+- Struct hasil open cdvdfsv 36 B = **CdlFILE**: `+0 = lsn`, `+4 = size` (bukan flag+size+lba —
+  kesalahan itu membuat ADXF membaca lsn 1 = system area ISO).
+- Status handle ADXF = byte `handle+1` (handle @0x3EAEC8): 1 init → 2 `read issued`
+  (store di 0x323C8C) → 3 `read end` (hanya di 0x323C58, jalur `v0 == 0`).
 
 ## 7. MMI R5900 di kode game (census 2026-10-24)
 

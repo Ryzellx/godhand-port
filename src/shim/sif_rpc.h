@@ -25,6 +25,9 @@ enum : u32 {
     SRV_MCSERV   = 0x80000400u,   // mcman.irx @0x4300 + mcserv.irx @0x2e4
     SRV_SJX      = 0x90000200u,   // SJX/CRI sound engine (libsjx + cri_adxi)
     SRV_PAD      = 0x80000100u,   // padman.irx @0x7a80 (0x80000101 = server kedua)
+    SRV_CDVD_EE  = 0x80000595u,   // cdvdfsv.irx server kedua: register 0x44a4 ->
+                                  // FUN_00003c1c "sce_cdvd N cmd", jump table .data 0x53d0.
+                                  // fno 1 = Read_EE (baca sektor langsung ke RAM EE).
     SRV_CDVDFS   = 0x80000597u,   // cdvdfsv.irx (IOPRP310 m09.elf): file system CD
                                   // (open/read file disc). Dispatch server ASLI by size
                                   // paket (300 = open), bukan fno — lihat cdvfs_handler.
@@ -64,6 +67,12 @@ bool take_ee_writeback(EeWrite& out);
 u64 cdvfs_open_ok();
 u64 cdvfs_open_miss();
 u64 cdvfs_other_calls();
+
+// Read_EE (SID 0x80000595 fno 1) — jalur baca sektor mentah ke RAM EE.
+u64 cdvd_read_ok();
+u64 cdvd_read_fail();
+u64 cdvd_read_bytes();
+u64 cdvd_other_calls();   // fno lain di SID 0x80000595 (mis. 14 = cek drive)
 
 struct Stats { u64 calls = 0, unknown = 0, bytes_in = 0, bytes_out = 0; };
 const Stats& stats();

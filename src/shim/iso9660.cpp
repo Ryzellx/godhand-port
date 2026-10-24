@@ -142,4 +142,12 @@ bool read_all(const std::string& ps2_path, std::vector<u8>& out) {
     return s.size == 0 || read_at(s.lba, s.size, 0, out.data(), s.size) == s.size;
 }
 
+u32 read_sectors(u32 lsn, u32 nsec, void* buf, u32 sector_size) {
+    if (!g_fp || nsec == 0 || sector_size == 0) return 0;
+    u64 pos = (u64)lsn * (u64)sector_size;
+    u64 n = (u64)nsec * (u64)sector_size;
+    if (pread_at(pos, buf, (u32)n)) return (u32)n;
+    return 0;
+}
+
 } // namespace iso9660

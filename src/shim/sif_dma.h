@@ -35,6 +35,7 @@ struct Stats {
     u64 cid_other = 0, pkt_short = 0;
     u64 bind_replies = 0, call_replies = 0, sema_signals = 0;
     u64 cb_queued = 0;   // end_func yang diantrekan (Phase 9, emulasi _request_end)
+    u64 stat_pending = 0, stat_retired = 0;   // SifDmaStat: poll saat masih antre / sudah pensiun
     u64 unknown_server = 0, handler_fail = 0, autostub = 0;
     u64 payload_bytes = 0, reply_bytes = 0;
     u32 last_cid = 0, last_server = 0, last_func = 0, last_result = 0;

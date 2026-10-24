@@ -21,6 +21,7 @@ constexpr u32 MAX_XFER = 8u * 1024u * 1024u;       // guard alokasi
 std::vector<u8> g_iop;
 Stats g_st;
 u32 g_last_id = 0;
+bool g_last_polled = true;
 int g_verbose = 0;
 int g_dumped = 0;
 // DUA RUANG ALAMAT BERBEDA — jangan disatukan:
@@ -138,6 +139,7 @@ void reset() {
     g_iop.clear();
     g_st = Stats{};
     g_last_id = 0;
+    g_last_polled = true;
     g_dumped = 0;
     g_cd_server.clear();
     std::memset(g_sreg, 0, sizeof(g_sreg));
@@ -152,7 +154,18 @@ bool iop_read(u32 addr, void* out, u32 n) {
     return iop_copy_out(addr, (u8*)out, n);
 }
 
-u32 dma_stat(u32) { return 0xFFFFFFFFu; }   // -1: tidak ada transfer aktif (instan)
+// SifDmaStat (syscall 118). Model antrean nyata, bukan konstanta: transfer kita
+// dieksekusi sinkron saat kick, tapi kernel PS2 baru melepas entri antrean setelah
+// poll pertama. Kontrak terukur (kode game 0x2be3d8): `while (SifDmaStat(id) < 0)` —
+// jadi poll pertama HARUS mengembalikan status (>=0), poll berikutnya -1 (entri
+// pensiun). Dengan -1 mutlak, loop itu tidak pernah selesai: 15.693.109 syscall 118
+// di run 200 M (luapan counter), boot mati sebelum loadfile.
+u32 dma_stat(u32 id) {
+    if (id == 0) return 0xFFFFFFFFu;
+    if (id == g_last_id && !g_last_polled) { g_last_polled = true; g_st.stat_pending++; return 0; }
+    g_st.stat_retired++;
+    return 0xFFFFFFFFu;
+}
 
 u32 kick(u32 sdd_addr, u32 count) {
     g_st.kicks++;
@@ -408,6 +421,7 @@ u32 kick(u32 sdd_addr, u32 count) {
         u32 flag = eebus::read32(0x0077E6C0u);
         eebus::write32(0x0077E6C0u, flag | 1u);
     }
+    g_last_polled = false;
     return ++g_last_id;
 }
 

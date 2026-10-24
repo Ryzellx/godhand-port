@@ -89,9 +89,12 @@ Metode: static decompilation + reimplementation layer (jalur OpenGOAL-style).
       padman 45.952 · libsd 30.144 · SDRDRV 9.216 · sdhd 14.720 · snddrv 20.352 ·
       cri_adxi 76.928 B), iopheap alloc 2.256 B → 0x00130000 lalu 332.864 B → 0x00130900,
       deterministik 5/5 identik.
-- [ ] Phase 9 — boot native sampai render loop (LOG #18): end_func SIF0 aktif → 9 modul IOP,
-      CDVFS open 4/4 dari ISO9660 mentah. Dinding sekarang: ADXF status 2 (butuh jalur read CDVD
-      SID 0x80000595 fno=1) sebelum VU1/render bisa disentuh.
+- [~] Phase 9 — boot native sampai render loop (LOG #18 + #19): end_func SIF0 aktif, CDVFS open
+      4/4 dari ISO9660 mentah, **Read_EE (SID 0x80000595 fno=1) hidup** — 2 baca nyata dari ISO
+      (IRX.IMS lsn 2175×154, 0FLISTDV.DIR lsn 755203×2, 319.488 B) + `SifDmaStat` model antrean.
+      Dinding sekarang: ADXF state byte (handle+1) tetap **2 "read issued"**, belum 3 "read end";
+      transisi 3 ada di 0x323C58 (kondisi v0==0) dan tidak tercapai — berikutnya: jalur completion
+      ADXF (callback 0x3A8580 + ctx 144 B @0x3F9740) sebelum VU1/render disentuh.
 - [ ] **PLAYABLE** 🎮 (stage st0 load + input + render loop)
 - [ ] **PLAYABLE** 🎮 (stage st0 load + input + render loop)
 
@@ -535,6 +538,74 @@ Bukti (crt0_test, angkanya dari run nyata):
 semua `stop=clean-cap`, nol fault.
 
 **5) Commit:** `505c972` (end_func) + commit ini (iso9660 + cdvfs).
+
+### LOG 2026-10-24 #19 (Phase 9: Read_EE 0x80000595 hidup — CDVD baca sektor nyata; LSN CdlFILE dibetulkan)
+
+**1) Server SID 0x80000595 dipetakan dari modul IOP asli, bukan tebakan**
+
+- `extract/modules/ioprp/m09.elf` (cdvdfsv.irx, 33.440 B): registrasi RPC di **FUN_000044a4**
+  → `FUN_00004bc8(0x58e8, 0x80000595, FUN_00003c1c)`. Dispatcher `FUN_00003c1c`
+  (string `sce_cdvd N cmd start %d`) memakai **jump table .data 0x53d0** (19 entri, disasm
+  objdump `-m mips:isa32`): **fno 1 → 0x3CB4 → FUN_00001dc4**, fno 14 → 0x3F58 (cek drive).
+- Paket 24 B (dibangun klien EE 0x399728, dipanggil 0x331830 & 0x333808):
+  `+0 lsn, +4 nsec, +8 dst_EE, +12 mode[3]+pad, +16 ctx_EE (144 B, = end_param), +20 out_EE (4 B)`.
+  Ukuran sektor dari `mode[2]`: 1 → 2328, 2 → 2340, selain itu 2048 (0x1E98..0x1EE4).
+- IOP asli menyalin ke buffer internal lalu **DMA dua kali** (0x2630..0x2684):
+  `{0x5780 → ctx_EE, 144 B}` = `{prefix, trail, dst, dst+prefix+main}` dan
+  `{0x5a18 → out_EE, 4 B}` = jumlah byte terkirim. Native: baca ISO langsung (`iso9660::read_sectors`)
+  lalu tulis ke RAM EE di dua titik yang sama (`cdvd_ee_handler`).
+
+**2) Bug besar yang ketemu karena A/B, bukan opini: field +0 struct open = LSN, bukan flag**
+
+| Layout struct 36 B | Hasil Read_EE di boot nyata |
+|---|---|
+| `+0 = 1 (flag), +4 = size, +8 = lba` (lama) | **lsn=1 nsec=154** → membaca *system area* ISO, bukan file |
+| `+0 = lba, +4 = size` (CdlFILE: `u32 lsn`) | **lsn=2175 nsec=154** = `\MODULES\IRX.IMS;1` (iso_test: lba 2175, 314.304 B) |
+
+Bukti silang: baca kedua `lsn=755203 nsec=2` = `\0FLISTDV.DIR;1` (iso_test lba 755203, 23 B).
+Jadi ADXF mengambil LSN dari **+0**; "file ada" dibawa nilai balik RPC (= ukuran), bukan field.
+`GH_CDVFS_LEGACY=1` memulihkan layout lama untuk reproduksi.
+
+**3) `SifDmaStat` (syscall 118) salah kontrak → loop abadi 15,7 M syscall**
+
+- Kode game 0x2BE3D8: `while (SifDmaStat(id) < 0) ;` lalu lanjut memakai buffer hasil DMA.
+  Implementasi lama mengembalikan **-1 selamanya** → run 200 M menghabiskan 15.693.109 syscall 118,
+  boot mati sebelum loadfile. Model baru (antrean nyata): poll pertama setelah kick = **0**
+  (entri masih di antrean), poll berikutnya = **-1** (pensiun). Hasil: syscall 118 = **8**.
+- `sif_dma_test` diperbarui ke kontrak itu (10 → **11/11 PASS**).
+
+**4) Angka boot 200 M (run nyata, 5× identik)**
+
+| Metrik | LOG #18 | Sekarang |
+|---|---|---|
+| `cdvfs open` | 4 ok / 0 miss | 4 ok / 0 miss |
+| `cdvd-ee Read_EE` | 0 (autostub) | **2 ok / 319.488 B / 0 fail** (fno lain: 2 = cek drive) |
+| SIF DMA | 98 kicks / 13.340 B | **114 kicks / 204 entry / 251.068 B ee2iop**, iop2ee 144 B |
+| RPC bind/call | 13 / 80 | **13 / 88** (payload 7.244 B, reply 860 B) |
+| syscall 118 | 0 (jalur tak tercapai) | 8 |
+| Modul IOP dari disk | 9 (jalur loadfile) | 1 (`cri_adxi.irx`) + **8 panggilan loadfile fno=6** (payload 512 B, word0 = alamat IOP 0x130000/0x131480/0x13C800/0x143DC0/0x1461C0/0x149B40) masih autostub |
+| Titik akhir 400 M | 0x3B0AF8 | **0x323070** (loop ADXF status) |
+
+**5) Dinding baru (jujur, dengan alamat persis)**
+
+- Handle ADXF di 0x3EAEC8; **status byte = handle+1**. Nilai yang terukur: 1 (init) → **2** (store
+  `sb 2,1(s0)` di **0x323C8C**, artinya "read issued") → 3 hanya di **0x323C58** (jalur `v0 == 0`,
+  "read end"). Watchpoint 0x3EAEC0..0x3EAEE0 merekam semua tulisan: **tidak ada store 3**.
+- Total sample ADX terisi (0x3EAED4 = 0x000FFFFF, 0x3EAED8 = 0x7FFFF800), jadi header stream
+  terbaca — yang tidak jalan adalah transisi completion setelah Read_EE.
+- `adxf_GetStat(0)` = 0x323000 → 0x324500 = `lb v0,1(handle)`; loop pemanggil 0x1FFC30
+  (`jal 0x395398` vsync + `jal 0x323000`) membandingkan dengan 3. 400 M tetap di 0x323070.
+- Berikutnya (urut): (a) jalur completion ADXF — callback `end_func=0x3A8580` + isi ctx 144 B
+  @0x3F9740 (yang kita tulis `{prefix, trail, dst, dst+main}`); (b) 8× loadfile fno=6
+  (LoadModule dari buffer IOP) supaya modul yang sudah di-DMA game benar-benar "dimuat";
+  (c) baru VU1/render (Phase 7c).
+
+**6) Test floor 5× (md5 stdout identik, semua PASS)**
+
+`sif_test 41/41` 73372ce0 · `sif_dma_test 11/11` 435566a1 · `shim_test ALL` cc2ea3b0 ·
+`bus_test 20/20` a06a36af · `mmi_test 25/25` accd196e · `gif_test ALL` ade54fea ·
+`iso_test 18/18` e8332a85 · `crt0_test 30M` 68f69964 · `200M` 7b0a1819 · `400M` a8e98443,
+semua `stop=clean-cap`, nol fault.
 
 ## PROTOTYPE INTEL — God Hand Preview (Jun 20, 2006)
 Sumber: hiddenpalace.org, arsip 421.407.373 B (7z) berisi bin 1.261.928.448 B (MODE1/2048).

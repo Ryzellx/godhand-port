@@ -55,7 +55,12 @@ int main() {
     check("bind reply: rec_id bit1 (complete)", (get(PKT + 16) & 2u) != 0);
     check("bind reply: sema klien di-signal", eekern::PollSema(sema) >= 0);
     check("stats bind_replies=1", stats().bind_replies == 1);
-    check("dma_stat = -1 (selesai)", dma_stat(id) == 0xFFFFFFFFu);
+    // Kontrak nyata SifDmaStat (dibuktikan kode game 0x2be3d8 `while (stat < 0)`):
+    // poll pertama setelah kick masih melihat entri di antrean (>=0), poll berikutnya
+    // -1 = entri pensiun/transfer selesai. -1 mutlak bikin loop itu tak pernah keluar
+    // (terukur 15.693.109 syscall 118 di satu run 200 M).
+    check("dma_stat poll-1 = entri masih antre (0)", dma_stat(id) == 0);
+    check("dma_stat poll-2 = -1 (pensiun)", dma_stat(id) == 0xFFFFFFFFu);
 
     // ---- CALL fileio.open("cdrom0:\\SYSTEM.CNF;1", O_RDONLY)
     const char* path = "cdrom0:\\SYSTEM.CNF;1";
