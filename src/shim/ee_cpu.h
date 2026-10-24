@@ -70,6 +70,9 @@ struct Cpu {
     // halt_pc != 0 -> run() berhenti TEPAT sebelum eksekusi instruksi di alamat itu
     // (dipakai probe: lihat register hasil satu call tanpa mengubah semantik).
     u32  halt_pc = 0;
+    // Probe bersyarat: halt saat pc == probe_pc DAN r[probe_reg] >= probe_min.
+    // Dipakai membekukan state tepat di call site yang argumennya liar.
+    u32  probe_pc = 0, probe_reg = 0, probe_min = 0;
     u32  prev_inst = 0;      // opcode instruksi terakhir yg dieksekusi (deteksi delay-slot)
     u32  halt_skip = 0;      // lewati N hit pertama (utk membedakan panggilan ke-2 dst)
     u32  halt_skipped = 0;
@@ -99,6 +102,45 @@ struct Cpu {
     void set_gp(u32 gp) { if (gp) { r[28][0] = gp; r[28][1] = r[28][2] = r[28][3] = 0; } }
 };
 
+// ---- Phase 10: cooperative EE threads -------------------------------------
+// Mengapa: God Hand menggerakkan seluruh I/O disc lewat thread EE (ADXF worker
+// 0x324EB0/0x324F08/0x325010/0x325100, 5x CreateThread di 0x325404..0x3255D8).
+// Tanpa scheduler, StartThread gagal (status != 0x10) dan tidak ada Read_EE yang
+// pernah dikirim -> ADXF nyangkut di status 2 selamanya. Model di sini: satu
+// interpreter, banyak konteks register; switch hanya di titik aman (bukan delay
+// slot, bukan saat end-func callback aktif).
+constexpr u32 THREAD_EXIT_SENTINEL = 0xFFFFFFF8u;   // ra thread -> penanda keluar
+constexpr int MAX_EE_THREADS = 8;
+
+struct EeThread {
+    bool used = false, started = false, finished = false, waiting = false;
+    u32 entry = 0, gp = 0, stack = 0, stack_size = 0, prio = 0, arg = 0;
+    u64 inst = 0;               // instruksi dieksekusi thread ini (atribusi waktu)
+    u32 pc = 0, npc = 0;        // pasangan (pc,next_pc) — WAJIB disimpan apa adanya:
+                                // kalau next_pc di-reset ke pc+4, target branch yang
+                                // sedang di delay-slot hilang (terukur: memset 0x3A5364
+                                // jatuh ke loop byte dengan a2 = 0xFFFF8310).
+    Cpu::CbCtx ctx{};
+};
+struct ThreadTable {
+    EeThread t[MAX_EE_THREADS];
+    int cur = 0;        // 0 = thread utama (crt0)
+    int req = 0;        // 0 = tidak ada, -1 = yield, >0 = tid tujuan
+    u64 switches = 0, exits = 0;
+};
+extern ThreadTable g_threads;
+
+int  thread_create(u32 entry, u32 gp, u32 stack, u32 stack_size, u32 prio);  // -> tid (>=0)
+bool thread_start(int tid, u32 arg);
+void thread_exit_current();
+bool thread_delete(int tid);
+void thread_yield();
+int  thread_current();
+u32  thread_prio(int tid);
+bool thread_alive(int tid);
+bool thread_switch_pending();
+bool thread_yield_if_other();
+
 // jalankan sampai stop (syscall tak dikenal / fault / PC di luar RAM / instret cap).
 // handler dipanggil tiap syscall. return true = berhenti (lihat cpu.fault / instret).
 // Phase 7b.9: census busy-delay loop yang di-fast-forward (idiom
@@ -109,6 +151,7 @@ inline constexpr u32 CB_SENTINEL = 0xFFFFFFFCu;
 void request_callback(u32 func, u32 arg, u32 result);
 u32  pending_callbacks();
 extern u64 g_delay_loops;
+extern u64 g_ie0_inst;
 extern u64 g_delay_inst;
 
 bool run(Cpu& cpu, SyscallFn handler, u64 max_inst);

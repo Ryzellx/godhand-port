@@ -95,7 +95,9 @@ Metode: static decompilation + reimplementation layer (jalur OpenGOAL-style).
       Dinding sekarang: ADXF state byte (handle+1) tetap **2 "read issued"**, belum 3 "read end";
       transisi 3 ada di 0x323C58 (kondisi v0==0) dan tidak tercapai — berikutnya: jalur completion
       ADXF (callback 0x3A8580 + ctx 144 B @0x3F9740) sebelum VU1/render disentuh.
-- [ ] **PLAYABLE** 🎮 (stage st0 load + input + render loop)
+- [~] Phase 10 — scheduler thread EE (LOG #20): 5 thread ADXF hidup, Read_EE 2.257 baca /
+      4,9 MB, RPC 9.118 call, nol fault; dinding baru = jalur completion ADXF (`0x323AA0` →
+      `0x323F18` → `0x323A00`, service `0x323B58`/`0x324008` belum pernah dipanggil).
 - [ ] **PLAYABLE** 🎮 (stage st0 load + input + render loop)
 
 ## Engine Intel (ringkas — detail di ENGINE-MAP.md)
@@ -629,3 +631,61 @@ Rencana pakai proto:
 2. Anchor reversing: string + struktur menu → temukan tabel flag → kalau ID sama di retail,
    FPS camera/no-death bisa diaktifkan buat tes tanpa cheat engine.
 3. Diff dua ELF (US retail vs JP preview) buat prioritas fungsi engine vs konten.
+
+### LOG 2026-10-24 #20 (Phase 10: scheduler thread EE — 5 thread ADXF jalan, Read_EE 2.257 baca / 4,9 MB)
+
+**Akar masalah yang ditemukan (bukan tebakan, dari A/B run):** `StartThread` (syscall 34) **nol**
+di seluruh boot sebelumnya. Wrapper game `0x3B0BA8` menolak tiap thread karena cek
+`0x3B0BC0 → 0x3B06C8` = `(SR & 1) ^ 1` → SR.IE=0, lalu `0x3B0BD0` DIntc juga melihat EIE
+(bit16) mati. Jadi 5 thread ADXF (entry `0x324EB0`, `0x324F08`, `0x325010`, `0x325100` + sound
+`0x3B0878`) tidak pernah hidup → tidak ada yang mengirim Read_EE dari jalur ADXF.
+
+**Yang dibangun (kode, bukan catatan):**
+- `ee_cpu`: scheduler kooperatif. `EeThread{pc,npc,r[32][4],lo,hi,f,sa,facc,fcsr,inst}`,
+  switch **di batas instruksi murni** (sebelum fetch) supaya pasangan `(pc,next_pc)` utuh.
+  Percobaan pertama menyimpan `resume=c.pc` lalu restore `next_pc=pc+4` → target branch di
+  delay-slot hilang, terukur `memset` 0x3A5364 jatuh ke loop byte dengan `a2=0xFFFF8310`
+  (4,29 miliar iterasi, seluruh RAM dinolkan). Diperbaiki dengan menyimpan `pc/npc` apa adanya.
+- Timeslice `GH_SLICE` (default 20.000 instr) + `thread_yield_if_other()` untuk WaitSema/
+  SleepThread. Gate `GH_PREEMPT_IE=1` (preempt hanya saat IE=1) **terukur lebih buruk**:
+  89,8% instruksi boot berjalan dengan SR.IE=0 (`g_ie0_inst`) → preemption mati, ADXF 48 baca
+  di 400 M vs 2.257 tanpa gate. Default: tanpa gate.
+- **Stack per-thread** dari arena port `0x01D00000 + tid*64K`: 5 CreateThread game semuanya
+  mengirim `stack=0x468CF0` dengan ukuran 1.024/2.048/4.096/8.192 → kalau dipakai apa adanya
+  dua thread berbagi puncak stack (terukur `jr ra` mendarat di `0x3EC7E0` = .bss, fault
+  SPECIAL fn 1). Setelah per-thread stack: nol fault.
+- `CreateThread` param dibaca sesuai layout **terukur** di call site `0x3253C0`/`0x3B09B8`:
+  `+4 entry, +8 gp, +0xC stackSize, +0x10 stack, +0x14 prio` (layout lama salah: prio/stack
+  tertukar → prio 7854992).
+- Syscall 32/33/34/35/36/44/47/48 nyata: `ReferThreadStatus` menulis `+0 status=0x10 (WAIT)`,
+  `+8 stack`, `+0xC size` (field yang dibaca `0x3B0C20`), `DeleteThread`/`ExitDeleteThread`
+  membebaskan slot, `CreateThread` mendaur ulang slot thread yang selesai (tanpa ini 7 slot
+  penuh → thread per-request gagal dibuat).
+- Alat diagnosa baru: `GH_DUMP_END` (dump memori pasca-run), `GH_PROBE_PC/GH_PROBE_REG/
+  GH_PROBE_MIN` (halt bersyarat: pc == X dan reg >= Y), `GH_SWITCH_LOG`, census `[ie]`,
+  `[sched]` per-thread (entry/pc/inst).
+
+**Angka nyata `crt0_test 400 M` (5× md5 identik `761f3c72`):**
+
+| Metrik | LOG #19 | Sekarang |
+|---|---|---|
+| `cdvd-ee Read_EE` | 2 ok / 319.488 B | **2.257 ok / 4.937.728 B / 0 fail** |
+| SIF DMA | 114 kicks / 204 entry | **9.146 kicks / 11.493 entry / 887.492 B** |
+| RPC bind/call | 13 / 88 | **13 / 9.118** (payload 61.364 B, reply 27.960 B) |
+| end_func dieksekusi | 2 | **2.257** |
+| syscall total | 977.358 | **1.499.973** (38 nomor, 34 StartThread **5**) |
+| Thread hidup | 0 | **5** (inst: t0 160,6 M · t2 177,9 M · t3 28,6 M · t4 24,8 M · t5 7,9 M) |
+| Titik akhir 400 M | 0x323070 (poll ADXF) | 0x324E98 (loop idle thread ADXF) |
+
+**Floor 5× (md5 stdout identik, semua PASS):** `sif 41/41` 73372ce0 · `sif_dma 11/11` 435566a1 ·
+`shim cc2ea3b0` · `bus 20/20 a06a36af` · `mmi 25/25 accd196e` · `gif ade54fea` · `iso 18/18 e8332a85` ·
+`crt0 30 M 0408818b / 200 M 749001f7 / 400 M 761f3c72`, semua `stop=clean-cap`, nol fault.
+
+**Belum (jujur, dengan alamat):** ADXF state byte `handle+1` (handle `0x3EAEC8`) tetap **2**;
+`+0x14` (offset) tetap 0 → sektor **2329** dibaca berulang (380× di 100 M; hanya 3 LSN unik:
+2175 IRX.IMS, 755203 0FLISTDV.DIR, 2329×N). Tiga fungsi layanan yang seharusnya memproses
+completion **tidak pernah dieksekusi** (probe window, 60 M): `0x323AA0` (dispatch status==2 →
+`0x323F18`), `0x323B58` (service semua handle → `0x323B80`), `0x324008`/`0x324040` (dipanggil
+main loop game di `0x200F9C`/`0x201048`, belum tercapai). Berikutnya: panggil/completion ADXF —
+`0x323F18` menghitung `0x328140(fd) - [h+0x14]`, menyetel `[h+0x20]`, lalu `0x323A00` menaikkan
+offset; setelah itu baru status 3 → VU1/render.

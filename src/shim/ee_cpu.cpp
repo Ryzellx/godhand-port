@@ -20,6 +20,11 @@ void Cpu::reset(u32 entry) {
     next_pc = entry + 4;
     sa = 0; facc = 0; fcsr = 0;
     std::memset(cop0, 0, sizeof(cop0));
+    // Status EE setelah kernel ROM menyerahkan kendali ke ELF: IE (bit0) + EIE (bit16)
+    // HIDUP. Bukti terukur: wrapper StartThread 0x3B0BA8 menolak (-1) semua thread
+    // karena 0x3B06C8 `(sr^1)&1` = 1 dan DIntc 0x3B63A0 `sr & 0x10000` = 0 -> 5 thread
+    // ADXF tak pernah jalan, Read_EE tak pernah dikirim. Nilai ini yang dibaca juga
+    // oleh EIntc/DIntc (0x3B63F0 / 0x3B63A0) untuk restore.
     std::memset(f, 0, sizeof(f));
     instret = 0;
     fault = nullptr;
@@ -27,6 +32,11 @@ void Cpu::reset(u32 entry) {
     std::memset(mmi_fn_hits, 0, sizeof(mmi_fn_hits));
     std::memset(mmi_sub_hits, 0, sizeof(mmi_sub_hits));
     std::memset(sp3_fn_hits, 0, sizeof(sp3_fn_hits));
+    cop0[12] = 0x00010001u;
+    // Thread table: slot 0 = thread utama (crt0). Wajib "used" supaya scheduler
+    // bisa menyimpan/memulihkan konteksnya saat worker thread jalan.
+    g_threads = ThreadTable{};
+    g_threads.t[0].used = true;
 }
 
 static inline u32 sx16(u32 v) { return (u32)(int32_t)(int16_t)(v & 0xFFFF); }
@@ -144,7 +154,148 @@ static inline void fset(Cpu& c, u32 i, float v) { u32 b; std::memcpy(&b, &v, 4);
 
 // __PART3__
 
+
+// ---------------------------------------------------------------- threads
+ThreadTable g_threads;
+
+namespace {
+void save_ctx(Cpu& c, EeThread& t) {
+    std::memcpy(t.ctx.r, c.r, sizeof(t.ctx.r));
+    std::memcpy(t.ctx.lo, c.lo, sizeof(t.ctx.lo));
+    std::memcpy(t.ctx.hi, c.hi, sizeof(t.ctx.hi));
+    std::memcpy(t.ctx.f, c.f, sizeof(t.ctx.f));
+    t.ctx.sa = c.sa; t.ctx.facc = c.facc; t.ctx.fcsr = c.fcsr;
+    t.pc = c.pc; t.npc = c.next_pc;      // simpan pasangan utuh (delay-slot safe)
+}
+void load_ctx(Cpu& c, EeThread& t) {
+    std::memcpy(c.r, t.ctx.r, sizeof(t.ctx.r));
+    std::memcpy(c.lo, t.ctx.lo, sizeof(t.ctx.lo));
+    std::memcpy(c.hi, t.ctx.hi, sizeof(t.ctx.hi));
+    std::memcpy(c.f, t.ctx.f, sizeof(t.ctx.f));
+    c.sa = t.ctx.sa; c.facc = t.ctx.facc; c.fcsr = t.ctx.fcsr;
+    c.pc = t.pc; c.next_pc = t.npc;
+}
+// Konteks awal thread: sp = puncak stack (16-aligned), a0 = arg, ra = sentinel
+// keluar. gp diwarisi dari param CreateThread (dipakai game untuk .sdata global).
+void init_ctx(EeThread& t, u32 arg) {
+    std::memset(&t.ctx, 0, sizeof(t.ctx));
+    // Stack per-thread dari arena port (0x01D00000 + tid*64K), BUKAN dari param game:
+    // 5 CreateThread di 0x3253C0/0x3B09B8 semuanya mengirim stack base 0x468CF0 dengan
+    // ukuran berbeda (1024/2048/4096/8192) -> kalau dipakai apa adanya, dua thread
+    // berbagi puncak stack yang sama dan saling menimpa frame (terukur: `jr ra` mendarat
+    // di 0x3EC7E0 = .bss, fault SPECIAL fn 1). Ukuran tetap dihormati (min 16 KB).
+    u32 want = t.stack_size < 0x4000u ? 0x4000u : ((t.stack_size + 0xFFFu) & ~0xFFFu);
+    int idx = (int)(&t - g_threads.t);
+    u32 sp = 0x01D00000u + (u32)(idx + 1) * 0x10000u;
+    sp = (sp & ~0xFu) - 0x10u;
+    (void)want;
+    t.ctx.r[29][0] = sp - 0x10;             // ruang argumen + alignment
+    t.ctx.r[28][0] = t.gp;
+    t.ctx.r[4][0]  = arg;
+    t.ctx.r[31][0] = THREAD_EXIT_SENTINEL;
+    t.pc  = t.entry;
+    t.npc = t.entry + 4;
+}
+int pick_next() {
+    // Round-robin dari thread sekarang; utamakan yang READY.
+    for (int k = 1; k <= MAX_EE_THREADS; k++) {
+        int i = (g_threads.cur + k) % MAX_EE_THREADS;
+        EeThread& t = g_threads.t[i];
+        if (!t.used) continue;
+        if (i == 0) return 0;                       // thread utama selalu siap
+        if (t.started && !t.finished) return i;
+    }
+    return -1;
+}
+void do_switch(Cpu& c) {
+    static const bool slog = std::getenv("GH_SWITCH_LOG") != nullptr;
+    int want = g_threads.req;
+    g_threads.req = 0;
+    int cur = g_threads.cur;
+    static u64 last_inst = 0;
+    if (g_threads.t[cur].used) {
+        g_threads.t[cur].inst += c.instret - last_inst;
+        save_ctx(c, g_threads.t[cur]);
+    }
+    last_inst = c.instret;
+    if (slog && cur == 0 && c.r[6][0] > 0x100000u)
+        std::fprintf(stderr, "[sw] SAVE t0 resume=0x%08x a0=0x%08x a2=0x%08x ra=0x%08x instret=%llu\n",
+                     c.pc, c.r[4][0], c.r[6][0], c.r[31][0], (unsigned long long)c.instret);
+    int next = -1;
+    if (want > 0 && want < MAX_EE_THREADS && g_threads.t[want].used &&
+        g_threads.t[want].started && !g_threads.t[want].finished) next = want;
+    if (next < 0) next = pick_next();
+    if (next < 0) return;                            // tidak ada tujuan: tetap di sini
+    if (next == cur) { load_ctx(c, g_threads.t[cur]); return; }
+    g_threads.t[next].waiting = false;
+    if (g_threads.t[next].pc == 0) init_ctx(g_threads.t[next], g_threads.t[next].arg);
+    load_ctx(c, g_threads.t[next]);
+    g_threads.cur = next;
+    g_threads.switches++;
+}
+} // namespace
+
+int thread_create(u32 entry, u32 gp, u32 stack, u32 stack_size, u32 prio) {
+    // Dua lintasan: (1) slot bebas, (2) slot milik thread yang sudah selesai.
+    // Game membuat thread per-request (mis. ADXF reader) lalu menghapusnya; tanpa
+    // daur ulang, 7 slot penuh -> CreateThread -1 -> request tak pernah diproses
+    // (terukur: sektor 2329 dibaca berulang 2257x, offset ADXF tetap 0).
+    for (int i = 1; i < MAX_EE_THREADS; i++) {
+        EeThread& t = g_threads.t[i];
+        if (t.used && !t.finished) continue;
+        t = EeThread{};
+        t.used = true; t.entry = entry; t.gp = gp;
+        t.stack = stack; t.stack_size = stack_size; t.prio = prio;
+        return i;
+    }
+    return -1;
+}
+bool thread_start(int tid, u32 arg) {
+    if (tid <= 0 || tid >= MAX_EE_THREADS || !g_threads.t[tid].used) return false;
+    if (g_threads.t[tid].started) return false;
+    g_threads.t[tid].started = true;
+    g_threads.t[tid].arg = arg;
+    init_ctx(g_threads.t[tid], arg);
+    g_threads.req = tid;
+    return true;
+}
+bool thread_delete(int tid) {
+    if (tid <= 0 || tid >= MAX_EE_THREADS || !g_threads.t[tid].used) return false;
+    if (tid == g_threads.cur) { thread_exit_current(); return true; }
+    g_threads.t[tid] = EeThread{};
+    return true;
+}
+
+void thread_exit_current() {
+    int cur = g_threads.cur;
+    if (cur > 0 && cur < MAX_EE_THREADS) {
+        g_threads.t[cur].finished = true;
+        g_threads.exits++;
+    }
+    g_threads.req = -1;
+}
+void thread_yield() { g_threads.req = -1; }
+int  thread_current() { return g_threads.cur; }
+u32  thread_prio(int tid) { return (tid >= 0 && tid < MAX_EE_THREADS) ? g_threads.t[tid].prio : 0; }
+bool thread_alive(int tid) {
+    if (tid == 0) return true;
+    return tid > 0 && tid < MAX_EE_THREADS && g_threads.t[tid].used && !g_threads.t[tid].finished;
+}
+bool thread_switch_pending() { return g_threads.req != 0; }
+
+// Yield hanya kalau ADA thread lain yang siap — dipakai WaitSema/SleepThread supaya
+// worker thread (ADXF reader) benar-benar dapat giliran, bukan busy-spin di syscall.
+bool thread_yield_if_other() {
+    // Thread utama (slot 0) SELALU siap: kalau yang jalan worker, yield ke main.
+    if (g_threads.cur != 0) { g_threads.req = -1; return true; }
+    for (int i = 1; i < MAX_EE_THREADS; i++)
+        if (g_threads.t[i].used && g_threads.t[i].started && !g_threads.t[i].finished &&
+            i != g_threads.cur) { g_threads.req = -1; return true; }
+    return false;
+}
+
 u64 g_delay_loops = 0;
+u64 g_ie0_inst = 0;      // census: instruksi dieksekusi dengan SR.IE=0 (critical section)
 u64 g_delay_inst  = 0;
 
 // end-func callback = model interrupt SIF0: di HW asli _request_end() memanggil
@@ -177,8 +328,40 @@ static bool take_callback(u32& f, u32& a, u32& r) {
 }
 u32 pending_callbacks() { return (u32)g_cb_n; }
 
+static bool ie_preempt_ok(u32 sr) {
+    static const bool gate = std::getenv("GH_PREEMPT_IE") != nullptr;
+    return !gate || (sr & 1u);
+}
+
 bool run(Cpu& c, SyscallFn handler, u64 max_inst) {
+    auto slice_len = [] {
+        const char* v = std::getenv("GH_SLICE");
+        return (u64)(v ? std::strtoull(v, nullptr, 0) : 20000ull);
+    };
+    u64 slice_left = slice_len();
     while (c.instret < max_inst) {
+        // ---- cooperative thread switch, di BATAS instruksi murni ----------
+        // Titik ini sebelum fetch: (pc,next_pc) masih utuh termasuk delay slot.
+        if (!c.cb_active) {
+            if (c.pc == THREAD_EXIT_SENTINEL && g_threads.cur != 0) {
+                thread_exit_current();
+                do_switch(c);
+            } else if (g_threads.req != 0) {
+                do_switch(c);
+            } else if ((ie_preempt_ok(c.cop0[12])) && slice_left && --slice_left == 0) {
+                // Default: preempt tanpa syarat IE. Gate IE=1 (GH_PREEMPT_IE=1) TERUKUR
+                // lebih buruk: 89,8% instruksi boot berjalan dengan SR.IE=0 (census
+                // g_ie0_inst), jadi gate itu mematikan hampir semua preemption ->
+                // ADXF cuma 48 baca di 400 M (vs 2257 tanpa gate).
+                slice_left = slice_len();
+                for (int i = 1; i < MAX_EE_THREADS; i++)
+                    if (g_threads.t[i].used && g_threads.t[i].started && !g_threads.t[i].finished) {
+                        g_threads.req = (g_threads.cur == 0) ? i : -1;
+                        break;
+                    }
+            }
+        }
+        if (!(c.cop0[12] & 1u)) g_ie0_inst++;
         u32 cur_pc = c.pc;
 
         if (eebus::g_watch_lo) eebus::g_cur_pc = cur_pc;
@@ -186,6 +369,10 @@ bool run(Cpu& c, SyscallFn handler, u64 max_inst) {
         if (c.halt_pc && cur_pc == c.halt_pc) {
             if (c.halt_skipped < c.halt_skip) { c.halt_skipped++; }
             else { c.halt_hits++; return false; }
+        }
+        if (c.probe_pc && cur_pc == c.probe_pc && c.r[c.probe_reg][0] >= c.probe_min) {
+            c.halt_hits++;
+            return false;
         }
         if (c.trace_lo && cur_pc >= c.trace_lo && cur_pc < c.trace_hi) {
             c.trace_win_hits++;
@@ -306,12 +493,15 @@ bool run(Cpu& c, SyscallFn handler, u64 max_inst) {
                 c.r[5][0] = r;              // a1 = result
                 c.pc = f; c.next_pc = f + 4;
                 c.cb_active = true;
-                std::fprintf(stderr, "[cb] stub 3b0060..70: %08x %08x %08x %08x %08x\n",
-                    eebus::read32(0x3b0060), eebus::read32(0x3b0064), eebus::read32(0x3b0068),
-                    eebus::read32(0x3b006c), eebus::read32(0x3b0070));
-                std::fprintf(stderr, "[cb] end_func=0x%08x arg=0x%08x res=%d (resume=0x%08x next=0x%08x prev=0x%08x instret=%llu)\n",
-                             f, a, (int)r, c.cb_resume, c.next_pc, prev_inst,
-                             (unsigned long long)c.instret);
+                static const bool cb_verbose = std::getenv("GH_CB_DUMP") != nullptr;
+                if (cb_verbose) {
+                    std::fprintf(stderr, "[cb] stub 3b0060..70: %08x %08x %08x %08x %08x\n",
+                        eebus::read32(0x3b0060), eebus::read32(0x3b0064), eebus::read32(0x3b0068),
+                        eebus::read32(0x3b006c), eebus::read32(0x3b0070));
+                    std::fprintf(stderr, "[cb] end_func=0x%08x arg=0x%08x res=%d (resume=0x%08x next=0x%08x prev=0x%08x instret=%llu)\n",
+                                 f, a, (int)r, c.cb_resume, c.next_pc, prev_inst,
+                                 (unsigned long long)c.instret);
+                }
             }
         }
         c.fault_op = inst;
@@ -797,11 +987,14 @@ bool run(Cpu& c, SyscallFn handler, u64 max_inst) {
             else if (crs == 0x10) {                            // CO ops (tlb/eret)
                 u32 f = fn(inst);
                 if (f == 0x38) {                               // EI (Enable Interrupt)
-                    c.cop0[12] |= 1;  // set IE bit in Status
+                    // R5900: EI men-set IE (bit0) DAN EIE (bit16) — dibuktikan oleh
+                    // DIntc game 0x3B63A0 yang menunggu `mfc0 sr & 0x10000` menjadi 0
+                    // setelah `di`. Dengan hanya bit0, loop itu spin (terukur 200 M).
+                    c.cop0[12] |= 0x00010001u;
                     break;
                 }
                 if (f == 0x39) {                               // DI (Disable Interrupt)
-                    c.cop0[12] &= ~1u;  // clear IE bit
+                    c.cop0[12] &= ~0x00010001u;                // IE + EIE
                     break;
                 }
                 if (f == 0x18) {                               // ERET: pc = ErrorEPC (cop0 r31)

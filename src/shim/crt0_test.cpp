@@ -93,6 +93,9 @@ static bool sys_handler(u32 num, u32 a0, u32 a1, u32 a2, u32 a3, u32& v0) {
         // (bug iterasi pertama: pol>=0 tapi tetap WaitSema -> count 0 -> deadlock).
         s32 pol = eekern::PollSema((s32)a0);
         if (pol >= 0) { v0 = 0; return true; }
+        // Kosong: beri giliran ke worker thread dulu (ADXF/sound), lalu model
+        // virtual-event lama (autosig) supaya thread utama tidak deadlock.
+        eecpu::thread_yield_if_other();
         eekern::SignalSema((s32)a0); g_sema_autosig++;
         std::fprintf(stderr, "[sema] WaitSema(%d) kosong -> autosig #%llu\n",
                      (int)a0, (unsigned long long)g_sema_autosig);
@@ -100,16 +103,48 @@ static bool sys_handler(u32 num, u32 a0, u32 a1, u32 a2, u32 a3, u32& v0) {
         return true;
     }
     case 69: v0 = (u32)eekern::PollSema((s32)a0); return true;     // PollSema
-    case 32: {  // CreateThread — a0 param struct, a1 = entry, a2 = stack
-        eekern::ThreadParam tp;
-        tp.prio = (s32)eebus::read32(a0 + 8);
-        tp.stack = eebus::read32(a0 + 12);
-        v0 = (u32)eekern::CreateThread(&tp, nullptr, (s32)a1);
+    case 32: {  // CreateThread — layout param TERUKUR dari 0x3253C0 (ADXF init):
+                // +0x04 entry, +0x08 gp, +0x0c stackSize, +0x10 stack base, +0x14 prio.
+                // Bukti: 5 call site 0x325404..0x3255D8 mengisi field itu sebelum syscall.
+        u32 entry = eebus::read32(a0 + 4);
+        u32 gp    = eebus::read32(a0 + 8);
+        u32 ssize = eebus::read32(a0 + 12);
+        u32 sbase = eebus::read32(a0 + 16);
+        u32 prio  = eebus::read32(a0 + 20);
+        int tid = eecpu::thread_create(entry, gp, sbase, ssize, prio);
+        std::fprintf(stderr, "[thread] create id=%d entry=0x%08x gp=0x%08x stack=0x%08x+%u prio=%u caller=0x%08x\n",
+                     tid, entry, gp, sbase, ssize, prio, eecpu::g_syscall_pc);
+        v0 = (u32)tid;
         return true;
     }
-    case 34: v0 = (u32)eekern::StartThread((s32)a0, (s32)a1); return true;  // StartThread
-    case 35: eekern::ExitThread(); v0 = 0; return true;                     // ExitThread
-    case 47: v0 = (u32)eekern::GetThreadId(); return true;                  // GetThreadId
+    case 34: {  // StartThread — jadwalkan konteks EE, bukan std::thread host
+        bool ok = eecpu::thread_start((int)a0, a1);
+        std::fprintf(stderr, "[thread] start id=%d arg=0x%08x -> %d caller=0x%08x\n",
+                     (int)a0, a1, ok ? 0 : -1, eecpu::g_syscall_pc);
+        v0 = ok ? 0u : (u32)-1;
+        return true;
+    }
+    case 35: eecpu::thread_exit_current(); v0 = 0; return true;              // ExitThread
+    case 36: {  // ExitDeleteThread
+        int me = eecpu::thread_current();
+        eecpu::thread_exit_current();
+        if (me > 0) eecpu::g_threads.t[me].used = false;   // slot langsung bebas
+        v0 = 0; return true;
+    }
+    case 33: v0 = eecpu::thread_delete((int)a0) ? 0u : (u32)-1; return true;  // DeleteThread
+    case 37: v0 = 0; return true;                                           // TerminateThread
+    case 44: eecpu::thread_yield(); v0 = 0; return true;                    // iRotateThreadReadyQueue
+    case 48: {  // ReferThreadStatus — field yang DIBACA game: +0 status, +8 stack, +0xc size
+                // (bukti: 0x3B0C20 `lw v1,12(sp); lw v0,8(sp); addu v0,v0,v1; addiu -672`).
+        int tid = (int)a0;
+        eebus::write32(a1 + 0, eecpu::thread_alive(tid) ? 0x10u : 0x02u);  // 0x10 = WAIT (siap start)
+        eebus::write32(a1 + 4, 0);
+        eebus::write32(a1 + 8, eecpu::g_threads.t[tid >= 0 && tid < eecpu::MAX_EE_THREADS ? tid : 0].stack);
+        eebus::write32(a1 + 12, eecpu::g_threads.t[tid >= 0 && tid < eecpu::MAX_EE_THREADS ? tid : 0].stack_size);
+        eebus::write32(a1 + 16, eecpu::thread_prio(tid));
+        v0 = 0; return true;
+    }
+    case 47: v0 = (u32)eecpu::thread_current(); return true;                 // GetThreadId
     case 41: v0 = (u32)eekern::ChangeThreadPriority((s32)a0, (s32)a1); return true;
     case 100: v0 = eekern::FlushCache(a0); return true;                     // FlushCache
     case 108: case 109: case 110: case 111: v0 = 0; return true;            // CPU timer stubs
@@ -164,6 +199,11 @@ static bool sys_handler(u32 num, u32 a0, u32 a1, u32 a2, u32 a3, u32& v0) {
     case 84: v0 = 0; return true;                                           // ClearEventFlag
     case 85: case 86: case 87: case 88: v0 = 0; return true;                // TLB (native: no-op)
     case 130: v0 = 0; return true;                                          // _InitTLB (flat RAM: no-op)
+    case 50: case 51:                                                      // SleepThread / iSleepThread
+        // Model kooperatif: tidur = lepas CPU ke thread lain (tanpa timer host).
+        eecpu::thread_yield_if_other();
+        v0 = 0; return true;
+    case 52: case 53: case 54: v0 = 0; return true;                        // Wakeup/CancelWakeup
     case 90: case 91: v0 = 0; return true;                                  // ReferEventFlagStatus (old)
     case 80: case 81: case 82: case 83: v0 = 0; return true;                // EventFlag old variants
     case 89: v0 = 0; return true;
@@ -212,6 +252,28 @@ static const char* region_of(u32 pc) {
     if (pc < 0x00600000) return "rodata";
     if (pc < 0x007867b4) return "bss";
     return "ram";
+}
+
+// Dump region memori ke stderr: "0xADDR:LEN,0xADDR:LEN". Nol efek ke state CPU —
+// dipakai diagnosis pasca-run (GH_DUMP_END) maupun tepat di halt (GH_DUMP_MEM).
+static void dump_mem_env(const char* dm) {
+    if (!dm) return;
+    std::string all(dm); size_t pos = 0;
+    while (pos < all.size()) {
+        size_t comma = all.find(',', pos);
+        std::string it = all.substr(pos, comma == std::string::npos ? std::string::npos : comma - pos);
+        size_t colon = it.find(':');
+        u32 a = (u32)std::strtoul(it.substr(0, colon).c_str(), nullptr, 0);
+        u32 n = colon == std::string::npos ? 16 : (u32)std::strtoul(it.substr(colon + 1).c_str(), nullptr, 0);
+        for (u32 o = 0; o < n; o += 16) {
+            std::fprintf(stderr, "  [%08x]", a + o);
+            for (u32 k = 0; k < 16 && o + k < n; k += 4)
+                std::fprintf(stderr, " %08x", eebus::read32(a + o + k));
+            std::fprintf(stderr, "\n");
+        }
+        if (comma == std::string::npos) break;
+        pos = comma + 1;
+    }
 }
 
 int main(int argc, char** argv) {
@@ -263,6 +325,11 @@ int main(int argc, char** argv) {
     // Semua output ke STDERR -> stdout tetap deterministik utk md5 rerun 5x.
     if (const char* h = std::getenv("GH_HALT_PC")) cpu.halt_pc = (u32)std::strtoul(h, nullptr, 0);
     if (const char* hs = std::getenv("GH_HALT_SKIP")) cpu.halt_skip = (u32)std::strtoul(hs, nullptr, 0);
+    if (const char* pp = std::getenv("GH_PROBE_PC")) {
+        cpu.probe_pc = (u32)std::strtoul(pp, nullptr, 0);
+        if (const char* pr = std::getenv("GH_PROBE_REG")) cpu.probe_reg = (u32)std::strtoul(pr, nullptr, 0);
+        if (const char* pm = std::getenv("GH_PROBE_MIN")) cpu.probe_min = (u32)std::strtoul(pm, nullptr, 0);
+    }
     if (const char* wt = std::getenv("GH_WATCH")) {
         std::string ww(wt); size_t dash = ww.find('-');
         eebus::watch_set((u32)std::strtoul(ww.substr(0, dash).c_str(), nullptr, 0),
@@ -284,6 +351,20 @@ int main(int argc, char** argv) {
     auto t1 = std::chrono::steady_clock::now();
     double sec = std::chrono::duration<double>(t1 - t0).count();
 
+    dump_mem_env(std::getenv("GH_DUMP_END"));
+    {   // Phase 10: status scheduler (diagnosa, ke stderr — stdout tetap deterministik)
+        std::fprintf(stderr, "[sched] switches=%llu exits=%llu cur=%d",
+                     (unsigned long long)eecpu::g_threads.switches,
+                     (unsigned long long)eecpu::g_threads.exits, eecpu::g_threads.cur);
+        for (int i = 0; i < eecpu::MAX_EE_THREADS; i++) {
+            const auto& t = eecpu::g_threads.t[i];
+            if (!t.used) continue;
+            std::fprintf(stderr, " | t%d entry=0x%08x %s%s pc=0x%08x inst=%llu",
+                         i, t.entry, t.started ? "started" : "idle",
+                         t.finished ? "/finished" : "", t.pc, (unsigned long long)t.inst);
+        }
+        std::fprintf(stderr, "\n");
+    }
     if (cpu.halt_hits) {
         std::fprintf(stderr, "[HALT] pc=0x%08x hits=%llu instret=%llu\n",
                      cpu.pc, (unsigned long long)cpu.halt_hits, (unsigned long long)cpu.instret);
@@ -293,24 +374,7 @@ int main(int argc, char** argv) {
         for (int i = 1; i < 32; i++)
             if (cpu.r[i][0] || i == 2 || i == 29 || i == 31)
                 std::fprintf(stderr, "  %-2s = 0x%08x\n", rn_[i], cpu.r[i][0]);
-        if (const char* dm = std::getenv("GH_DUMP_MEM")) {
-            std::string all(dm); size_t pos = 0;
-            while (pos < all.size()) {
-                size_t comma = all.find(',', pos);
-                std::string it = all.substr(pos, comma == std::string::npos ? std::string::npos : comma - pos);
-                size_t colon = it.find(':');
-                u32 a = (u32)std::strtoul(it.substr(0, colon).c_str(), nullptr, 0);
-                u32 n = colon == std::string::npos ? 16 : (u32)std::strtoul(it.substr(colon + 1).c_str(), nullptr, 0);
-                for (u32 o = 0; o < n; o += 16) {
-                    std::fprintf(stderr, "  [%08x]", a + o);
-                    for (u32 k = 0; k < 16 && o + k < n; k += 4)
-                        std::fprintf(stderr, " %08x", eebus::read32(a + o + k));
-                    std::fprintf(stderr, "\n");
-                }
-                if (comma == std::string::npos) break;
-                pos = comma + 1;
-            }
-        }
+        dump_mem_env(std::getenv("GH_DUMP_MEM"));
     }
     std::printf("crt0 run: instret=%llu stop=%s pc=0x%08x fault_pc=0x%08x fault_op=%08x\n",
                 (unsigned long long)cpu.instret,
@@ -398,6 +462,10 @@ int main(int argc, char** argv) {
                 (unsigned long long)eecpu::g_delay_inst,
                 cpu.instret ? 100.0 * (double)eecpu::g_delay_inst / (double)cpu.instret : 0.0);
 
+    std::fprintf(stderr, "[ie] inst_ie0=%llu (%.1f%%), switches=%llu\n",
+                 (unsigned long long)eecpu::g_ie0_inst,
+                 cpu.instret ? 100.0 * (double)eecpu::g_ie0_inst / (double)cpu.instret : 0.0,
+                 (unsigned long long)eecpu::g_threads.switches);
     std::fprintf(stderr, "timing: %.2f s (%.1f M inst/s)\n", sec,
                  sec > 0 ? cpu.instret / sec / 1e6 : 0.0);
 

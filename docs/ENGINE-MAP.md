@@ -91,6 +91,23 @@ Catatan model: `cd` (SifRpcClientData) game = {+0 pkt_addr, +4 rpc_id, +8 sema_i
 - Status handle ADXF = byte `handle+1` (handle @0x3EAEC8): 1 init → 2 `read issued`
   (store di 0x323C8C) → 3 `read end` (hanya di 0x323C58, jalur `v0 == 0`).
 
+### 7.2 Model thread EE (Phase 10, 2026-10-24)
+
+Satu interpreter, banyak konteks register (`ee_cpu.cpp`: `ThreadTable`/`EeThread`). Switch
+hanya di **batas instruksi** (sebelum fetch) dan menyimpan pasangan `(pc, next_pc)` utuh —
+menyimpan `pc` saja lalu me-restore `next_pc = pc+4` menghapus target branch yang sedang di
+delay-slot (terukur: memset `0x3A5364` jatuh ke loop byte `a2=0xFFFF8310`).
+
+| Fakta | Nilai terukur |
+|---|---|
+| Thread dibuat game | 5 ADXF (`0x324EB0` gp 0x3C81D0 · `0x324F08` gp 0x3C99D0 · `0x325010` gp 0x3CA9D0 · `0x325100` gp 0x3CB9D0) + 1 sound `0x3B0878` gp 0x77DB90 · call site CreateThread `0x3AFAA0` |
+| Param CreateThread | `+4 entry · +8 gp · +0xC stackSize · +0x10 stack · +0x14 prio` (dibaca di `0x3253C0`, `0x3B09B8`) |
+| Stack | game mengirim **base sama** `0x468CF0` untuk semua thread → port memakai arena `0x01D00000 + tid*64K` (kalau tidak: dua thread berbagi puncak stack, `jr ra` mendarat di `0x3EC7E0`) |
+| Status kernel | `ReferThreadStatus` (sys 48) harus menulis `+0 = 0x10 (WAIT)`, `+8 = stack`, `+0xC = size` — dibaca `0x3B0C20`; tanpa itu `StartThread` wrapper `0x3B0BA8` menolak semua thread |
+| SR awal | `cop0[12] = 0x00010001` (IE + EIE): `0x3B06C8` = `(SR&1)^1`, DIntc `0x3B63A0` menunggu bit16; `ei`/`di` (0x42000038/39) men-set/clear **dua** bit itu |
+| Exit stub | `ra` thread = `0xFFFFFFF8` (sentinel port) → `thread_exit_current()` |
+| Timeslice | `GH_SLICE` default 20.000 instruksi; gate `GH_PREEMPT_IE=1` terukur lebih buruk (89,8% instruksi boot SR.IE=0) |
+
 ## 7. MMI R5900 di kode game (census 2026-10-24)
 
 - **2.256 situs opcode 0x1C** (312 word unik, 34 mnemonic) di `.text` (0x100000..0x3BBF20).
