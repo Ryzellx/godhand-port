@@ -68,10 +68,21 @@ add_executable(crt0_test
   src/shim/ee_cpu.cpp
   src/shim/ee_bus.cpp
   src/shim/ee_kernel.cpp
-  src/shim/host_io.cpp)
-target_include_directories(crt0_test PRIVATE src/shim)
+  src/shim/host_io.cpp
+  src/shim/sif_rpc.cpp
+  src/shim/sif_dma.cpp
+  src/shim/memcard.cpp
+  src/shim/iso9660.cpp
+  src/gif/gif.cpp)
+target_include_directories(crt0_test PRIVATE src/shim src/gif)
 find_package(Threads REQUIRED)
 target_link_libraries(crt0_test PRIVATE Threads::Threads)
+
+# 4b) iso_test — pembaca ISO9660 mentah (CDVD backend), dibandingkan dengan hasil extract
+add_executable(iso_test
+  src/shim/iso_test.cpp
+  src/shim/iso9660.cpp)
+target_include_directories(iso_test PRIVATE src/shim)
 
 # 5) M7b unit probe — semantik branch/delay-slot/jal-jr kanonik MIPS + BTB census
 add_executable(branch_test
@@ -124,7 +135,11 @@ target_link_libraries(game_demo PRIVATE Vulkan::Vulkan)
 add_executable(sif_test
   src/shim/sif_test.cpp
   src/shim/sif_rpc.cpp
-  src/shim/host_io.cpp)
+  src/shim/host_io.cpp
+  src/shim/memcard.cpp
+  src/shim/iso9660.cpp
+  src/shim/ee_bus.cpp
+  src/shim/ee_kernel.cpp)   # cdvd Read_EE menulis langsung ke RAM EE
 target_include_directories(sif_test PRIVATE src/shim)
 
 # Phase 9a — CRI ADX decoder (audio backend) + verifikasi vs ffmpeg/vgmstream
@@ -137,3 +152,27 @@ target_link_libraries(adx_test PRIVATE gh_adx)
 # Memory proof for AdxStream: peak RSS vs the materialised timeline size.
 add_executable(adx_stream_rss tools/adx_stream_rss.cpp)
 target_link_libraries(adx_stream_rss PRIVATE gh_adx)
+
+# sif_dma_test: SifSetDma (syscall 119) -> sifcmd/sifrpc -> backend host (bukti wiring)
+add_executable(sif_dma_test
+  src/shim/sif_dma_test.cpp
+  src/shim/sif_dma.cpp
+  src/shim/sif_rpc.cpp
+  src/shim/host_io.cpp
+  src/shim/memcard.cpp
+  src/shim/iso9660.cpp
+  src/shim/ee_bus.cpp
+  src/shim/ee_kernel.cpp
+  src/shim/ee_cpu.cpp)   # eecpu::request_callback (end-func RPC, Phase 9)
+target_include_directories(sif_dma_test PRIVATE src/shim)
+target_link_libraries(sif_dma_test PRIVATE Threads::Threads)
+
+# mmi_test: unit test MMI R5900 (opcode 0x1C) — mengunci fix stub 2026-10-24
+add_executable(mmi_test
+  src/shim/mmi_test.cpp
+  src/shim/ee_cpu.cpp
+  src/shim/ee_bus.cpp
+  src/shim/ee_kernel.cpp
+  src/shim/host_io.cpp)
+target_include_directories(mmi_test PRIVATE src/shim)
+target_link_libraries(mmi_test PRIVATE Threads::Threads)

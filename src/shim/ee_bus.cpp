@@ -4,10 +4,28 @@
 #include "ee_kernel.h"
 
 #include <cstring>
+#include <cstdio>
+#include <cstdlib>
 #include <vector>
 
 namespace eebus {
+u32 g_watch_lo = 0, g_watch_hi = 0, g_cur_pc = 0;
+u64 g_watch_hits = 0, g_watch_cap = 200;
+void watch_set(u32 lo, u32 hi) { g_watch_lo = lo; g_watch_hi = hi; }
+
 namespace {
+inline void watch_log(u32 addr, u32 val, int sz) {
+    if (!g_watch_lo) return;
+    // Alias EE (0x2xxxxxxx uncached / 0x8xxxxxxx) dinormalkan: game sering menulis
+    // field objek lewat alias, jadi jendela watch harus melihat alamat kanonik
+    // (terukur: fd+1 tidak pernah muncul sebelum normalisasi ini).
+    u32 a = addr & 0x1FFFFFFFu;
+    if (a < g_watch_lo || a >= g_watch_hi) return;
+    g_watch_hits++;
+    if (g_watch_hits <= g_watch_cap)
+        std::fprintf(stderr, "[WW] pc=%08x addr=%08x val=%08x sz=%d raw=%08x\n",
+                     g_cur_pc, a, val, sz, addr);
+}
 
 std::vector<u8> g_ram;      // lazily allocated 32 MB
 u32 g_chcr = 0, g_madr = 0, g_qwc = 0, g_tadr = 0;
@@ -106,6 +124,15 @@ u32 mmio_read32(u32 addr) {
     // (deterministik, pola sama spt VIF_STAT0 di atas). 2026-10-19.
     case 0x1000F130:
         return 0u;  // GIF_STAT: selalu ready
+    // 0x1000F000 — register SIF DMA sisi EE (dipakai lib SIF game @0x3b0140,
+    // 0x3b01e0, 0x3b0234: tulis 4 -> sync -> poll ANDI 0x4 sampai set, dengan
+    // jalur abort kalau word status di stack != 0). Pola clear-then-wait:
+    // bit2 = "transfer SIF selesai". Model: DMA kita sinkron, jadi bit2 = 1
+    // (transfer dianggap langsung selesai). Tulis 4 = clear flag -> langsung
+    // ter-set lagi pada pembacaan berikutnya.
+    case 0x1000F000:
+        g_stats.mmio_other++;
+        return 0x4u;
     default:
         g_stats.mmio_other++;
         return 0;
@@ -140,16 +167,19 @@ void write8(u32 addr, u8 v) {
         if (addr == 0x1000F180) g_gif_busy = 6;  // kick GIF -> sibuk 6 poll
         return;
     }
+    watch_log(addr, v, 1);
     u32 off = addr & RAM_MASK;
     if (off < RAM_SIZE) ram()[off] = v;
 }
 void write16(u32 addr, u16 v) {
     if (is_mmio(addr)) return;
+    watch_log(addr, v, 2);
     u32 off = addr & RAM_MASK;
     if (off + 2 <= RAM_SIZE) { ram()[off] = v & 0xFF; ram()[off+1] = (v >> 8) & 0xFF; }
 }
 void write32(u32 addr, u32 v) {
     if (is_mmio(addr)) { mmio_write32(addr, v); return; }
+    watch_log(addr, v, 4);
     u32 off = addr & RAM_MASK;
     if (off + 4 <= RAM_SIZE) std::memcpy(ram().data() + off, &v, 4);
 }

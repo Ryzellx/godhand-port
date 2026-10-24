@@ -66,6 +66,34 @@ struct Cpu {
     u32* trace = nullptr;             // nullptr = trace mati
     u32  trace_mask = 0;              // size-1; indeks = instret & mask
     u32  trace_pos = 0;               // posisi tulis berikutnya (wraps)
+    // --- diagnosis Phase 8/9: halt + execution window trace -------------------
+    // halt_pc != 0 -> run() berhenti TEPAT sebelum eksekusi instruksi di alamat itu
+    // (dipakai probe: lihat register hasil satu call tanpa mengubah semantik).
+    u32  halt_pc = 0;
+    // Probe bersyarat: halt saat pc == probe_pc DAN r[probe_reg] >= probe_min.
+    // Dipakai membekukan state tepat di call site yang argumennya liar.
+    u32  probe_pc = 0, probe_reg = 0, probe_min = 0;
+    u32  prev_inst = 0;      // opcode instruksi terakhir yg dieksekusi (deteksi delay-slot)
+    u32  halt_skip = 0;      // lewati N hit pertama (utk membedakan panggilan ke-2 dst)
+    u32  halt_skipped = 0;
+    u64  halt_hits = 0;
+    // --- SIF RPC end-function callback (Phase 9) -------------------------------
+    // Di HW asli _request_end() (interrupt SIF0) memanggil end_func(end_param, result)
+    // di konteks EE setelah transfer selesai. Tanpa ini klien async (mis. libcdvd
+    // 0x3998A0 -> end_func 0x3A8580) menunggu flag-nya selamanya: terukur spin di
+    // 0x398DD8 karena [0x3F8674] tak pernah dinolkan.
+    u32  cb_func = 0, cb_arg = 0, cb_res = 0, cb_resume = 0;
+    bool cb_active = false;
+    // Konteks yang diselamatkan saat end_func dipanggil (interrupt SIF0 di HW asli
+    // menyimpan seluruh register file thread; tanpa ini register pemanggil rusak —
+    // terukur: sp jadi 0x023F86F0 = di luar RAM 32 MB).
+    struct CbCtx { u32 r[32][4]; u32 lo[4], hi[4], sa, facc, fcsr, f[32]; u32 resume; };
+    CbCtx cb_save[4];
+    int   cb_depth = 0;
+    // trace_lo < pc < trace_hi -> cetak tiap instruksi di jendela itu ke stderr
+    // (pc, word, GPR kunci). Nol efek pada state; hanya observasi.
+    u32  trace_lo = 0, trace_hi = 0;
+    u64  trace_win_hits = 0, trace_win_cap = 4000;
 
     void reset(u32 entry);
     u32  get(u32 i) const { return r[i][0]; }
@@ -74,11 +102,64 @@ struct Cpu {
     void set_gp(u32 gp) { if (gp) { r[28][0] = gp; r[28][1] = r[28][2] = r[28][3] = 0; } }
 };
 
+// ---- Phase 10: cooperative EE threads -------------------------------------
+// Mengapa: God Hand menggerakkan seluruh I/O disc lewat thread EE (ADXF worker
+// 0x324EB0/0x324F08/0x325010/0x325100, 5x CreateThread di 0x325404..0x3255D8).
+// Tanpa scheduler, StartThread gagal (status != 0x10) dan tidak ada Read_EE yang
+// pernah dikirim -> ADXF nyangkut di status 2 selamanya. Model di sini: satu
+// interpreter, banyak konteks register; switch hanya di titik aman (bukan delay
+// slot, bukan saat end-func callback aktif).
+constexpr u32 THREAD_EXIT_SENTINEL = 0xFFFFFFF8u;   // ra thread -> penanda keluar
+constexpr int MAX_EE_THREADS = 8;
+
+struct EeThread {
+    bool used = false, started = false, finished = false, waiting = false;
+    u32 entry = 0, gp = 0, stack = 0, stack_size = 0, prio = 0, arg = 0;
+    u64 inst = 0;               // instruksi dieksekusi thread ini (atribusi waktu)
+    u32 pc = 0, npc = 0;        // pasangan (pc,next_pc) — WAJIB disimpan apa adanya:
+                                // kalau next_pc di-reset ke pc+4, target branch yang
+                                // sedang di delay-slot hilang (terukur: memset 0x3A5364
+                                // jatuh ke loop byte dengan a2 = 0xFFFF8310).
+    Cpu::CbCtx ctx{};
+};
+struct ThreadTable {
+    EeThread t[MAX_EE_THREADS];
+    int cur = 0;        // 0 = thread utama (crt0)
+    int req = 0;        // 0 = tidak ada, -1 = yield, >0 = tid tujuan
+    u64 switches = 0, exits = 0;
+};
+extern ThreadTable g_threads;
+
+int  thread_create(u32 entry, u32 gp, u32 stack, u32 stack_size, u32 prio);  // -> tid (>=0)
+bool thread_start(int tid, u32 arg);
+void thread_exit_current();
+bool thread_delete(int tid);
+void thread_yield();
+int  thread_current();
+u32  thread_prio(int tid);
+bool thread_alive(int tid);
+bool thread_switch_pending();
+bool thread_yield_if_other();
+
 // jalankan sampai stop (syscall tak dikenal / fault / PC di luar RAM / instret cap).
 // handler dipanggil tiap syscall. return true = berhenti (lihat cpu.fault / instret).
 // Phase 7b.9: census busy-delay loop yang di-fast-forward (idiom
 // addiu rt,rt,-1 / 4x nop / bne rt,rs,self). Semantik tetap eksak.
+inline u32 g_syscall_pc = 0;   // pc instruksi SYSCALL terakhir (diagnosa provenance)
+inline u64 g_syscall_ivariant = 0;   // jumlah syscall varian "i" (nomor negatif) yang dinormalkan
+// INTC handler table (syscall 16/17/19). Pixel/VSync dispatch: lihat intc_dispatch().
+int  intc_add(u32 cause, u32 handler, u32 arg);
+bool intc_remove(u32 handler);
+void intc_dispatch(u32 cause);      // panggil semua handler utk cause (queue end-func style)
+u64  intc_frame();
+u32  intc_count();
+u64  intc_fired();                  // jumlah callback INTC yang sudah diantrekan
+// antrean callback end-func (maks 8; dipakai sif_dma saat RPC non-block selesai)
+inline constexpr u32 CB_SENTINEL = 0xFFFFFFFCu;
+void request_callback(u32 func, u32 arg, u32 result);
+u32  pending_callbacks();
 extern u64 g_delay_loops;
+extern u64 g_ie0_inst;
 extern u64 g_delay_inst;
 
 bool run(Cpu& cpu, SyscallFn handler, u64 max_inst);

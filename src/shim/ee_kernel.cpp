@@ -1,5 +1,7 @@
 // ee_kernel.h — implementasi portable (std::thread; jalan di Linux & mingw/Win)
 #include "ee_kernel.h"
+#include <cstdlib>
+#include <cstdio>
 #include "host_io.h"
 #include <filesystem>
 
@@ -277,6 +279,10 @@ s32 DeleteSema(s32 id) {
     return g_semas.erase(id) ? 0 : -1;
 }
 
+// ABI EE (ps2sdk kernel.h): WaitSema/PollSema/SignalSema mengembalikan **id sema**
+// kalau sukses, negatif (=E_SEMA_*) kalau gagal — BUKAN 0. Terukur di God Hand:
+// libcdvd @0x3988DC membandingkan `lw v1,[0x408668]` (id) dengan hasil PollSema dan
+// keluar error kalau beda -> cvFsOpen gagal -> adxstmf "can't open GodHand.fst".
 s32 WaitSema(s32 id) {
     std::unique_lock<std::mutex> lk(g_mu);
     auto it = g_semas.find(id);
@@ -284,7 +290,7 @@ s32 WaitSema(s32 id) {
     auto s = it->second;
     g_cv.wait(lk, [&] { return s->count > 0; });
     s->count--;
-    return 0;
+    return id;
 }
 
 s32 SignalSema(s32 id) {
@@ -293,7 +299,7 @@ s32 SignalSema(s32 id) {
     if (it == g_semas.end()) return -1;
     if (it->second->count < it->second->max) it->second->count++;
     g_cv.notify_all();
-    return 0;
+    return id;                    // ABI: id sema, bukan 0
 }
 
 s32 PollSema(s32 id) {
@@ -302,7 +308,7 @@ s32 PollSema(s32 id) {
     if (it == g_semas.end()) return -1;
     if (it->second->count <= 0) return -1;
     it->second->count--;
-    return 0;
+    return id;                    // ABI: id sema, bukan 0
 }
 
 s32 ReferSemaStatus(s32 id, s32* out) {
@@ -451,7 +457,13 @@ void sif_regs_reset() {
     g_sif_reg[4] = 0x00020000u;
 }
 u32 SifSetReg(u32 reg, u32 val) {
-    if (reg < SIF_REG_N) { g_sif_reg[reg] = val; g_sif_set_n[reg]++; return 1; }
+    static int logn = 0;
+    if (std::getenv("GH_SIF_REGLOG") && logn++ < 16)
+        std::fprintf(stderr, "[sifreg] set[%u]=0x%08x\n", reg, val);
+    // Semantik bit-set (bukan overwrite): SifSetReg menandai bit status. Terukur dari
+    // urutan game: set[4]=0x60000 -> 0x40000 -> 0x10000 -> 0x20000, lalu poll
+    // `and 0x40000` (0x3b6250). Dengan overwrite, bit 0x40000 hilang -> spin 93 M call.
+    if (reg < SIF_REG_N) { g_sif_reg[reg] |= val; g_sif_set_n[reg]++; return 1; }
     g_sif_set_oob++; g_sif_set_oob_last = reg; return 1;
 }
 u32 SifGetReg(u32 reg) {

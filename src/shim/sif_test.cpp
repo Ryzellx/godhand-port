@@ -2,6 +2,10 @@
 // Bukti nyata: baca file asli dari extract ISO lewat jalur RPC fileio.
 #include "host_io.h"
 #include "sif_rpc.h"
+#include "memcard.h"
+#include "iso9660.h"
+#include <cstdlib>
+#include <filesystem>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -28,12 +32,17 @@ static std::vector<u8> str_req(const std::string& s, u32 extra = 0) {
     v.insert(v.end(), e.begin(), e.end());
     return v;
 }
+static std::string hex32(u32 v) { char b[16]; std::snprintf(b, sizeof b, "0x%08x", v); return b; }
+
 static u32 rd32(const std::vector<u8>& v, size_t off = 0) {
     if (off + 4 > v.size()) return 0;
     return (u32)v[off] | ((u32)v[off + 1] << 8) | ((u32)v[off + 2] << 16) | ((u32)v[off + 3] << 24);
 }
 
 int main(int argc, char** argv) {
+    // memcard di direktori uji yang bersih (bukan HOME user)
+    setenv("GH_MEMCARD_DIR", "/root/.hermes/cache/scratch/mc_test", 1);
+    std::filesystem::remove_all("/root/.hermes/cache/scratch/mc_test");
     std::string root = argc > 1 ? argv[1] : "/root/ports/godhand/extract";
     std::printf("root: %s\n", root.c_str());
     chk(hostio::init(root), "hostio::init", hostio::root());
@@ -93,14 +102,136 @@ int main(int argc, char** argv) {
     chk(called && res == 0, "fileio.close via RPC");
 
     // 7. pad + cdvd server hidup
-    call(SRV_PAD, 1, {}, rep, res);
-    chk(res == 0 && rd32(rep, 0) == 0xFFFF, "pad state netral", "0x" + std::to_string(rd32(rep, 0)));
+    // Kontrak fno 1 = scePadRead (bukan "state netral" saja): request 128 B word0=0x12,
+    // reply dibaca game di word[3] dan dicek (ret>>8)==4 = PAD_STATE_STABLE (0x39770c).
+    // Sebelum 2026-10-24 reply 12 B tanpa word[3] -> game mengulang 49.307x, nol render.
+    { std::vector<u8> rq(128, 0); rq[0] = 0x12; call(SRV_PAD, 1, rq, rep, res); }
+    chk(res == 0 && (rd32(rep, 12) >> 8) == 4, "pad read state STABLE",
+        hex32(rd32(rep, 12)));
     call(SRV_CDVD, 0, {}, rep, res);
     chk(res == 0 && rd32(rep, 0) == 1, "cdvd disk ready");
 
     // 8. listdir root
     auto items = hostio::listdir("cdrom0:\\");
     chk(!items.empty(), "listdir root", std::to_string(items.size()) + " entri");
+
+    // 9. memcard: mkdir + tulis + baca balik + stat + listdir + getinfo
+    chk(memcard::init(), "memcard::init", memcard::root());
+    chk(memcard::mkdir("mc0:/BASLUS-21503"), "memcard mkdir mc0:/BASLUS-21503");
+    chk(!memcard::resolve("mc0:/../etc/passwd", out), "memcard traversal ditolak");
+
+    s32 mfd = memcard::open("mc0:/BASLUS-21503/SAVE.DAT", 3 | 0x200);   // RDWR|CREAT
+    chk(mfd >= 1000, "memcard open CREAT", "fd=" + std::to_string(mfd));
+    std::vector<u8> pattern(4096);
+    for (size_t i = 0; i < pattern.size(); i++) pattern[i] = (u8)(i * 7 + 3);
+    u32 wrote = memcard::write(mfd, pattern.data(), (u32)pattern.size());
+    chk(wrote == 4096, "memcard write 4096 B", std::to_string(wrote) + " B");
+    chk(memcard::lseek(mfd, 0, 0) == 0, "memcard lseek 0");
+    std::vector<u8> back(4096);
+    u32 rgot = memcard::read(mfd, back.data(), (u32)back.size());
+    chk(rgot == 4096 && back == pattern, "memcard read-back byte-exact",
+        std::to_string(rgot) + " B");
+    chk(memcard::size(mfd) == 4096, "memcard size", std::to_string(memcard::size(mfd)));
+    memcard::close(mfd);
+
+    u32 msz = 0, mmode = 0;
+    bool mstat = memcard::stat("mc0:/BASLUS-21503/SAVE.DAT", msz, mmode);
+    chk(mstat && msz == 4096, "memcard stat via path", std::to_string(msz) + " B");
+    auto mc_items = memcard::listdir("mc0:/BASLUS-21503");
+    bool has_save = false;
+    for (auto& it : mc_items) if (it == "SAVE.DAT") has_save = true;
+    chk(has_save, "memcard listdir", std::to_string(mc_items.size()) + " entri");
+
+    memcard::Info mi = memcard::getinfo();
+    chk(mi.used_clusters == 1 && mi.free_clusters == 14 && mi.free_bytes == 14 * 8192,
+        "memcard getinfo cluster", "used=1 free=14 free_bytes=" + std::to_string(mi.free_bytes));
+
+    // 10. getinfo lewat server mcserv (jalur RPC)
+    called = call(SRV_MCSERV, 0, {}, rep, res);
+    u32 rpc_free = rd32(rep, 12);
+    chk(called && res == 0 && rpc_free == 14 * 8192,
+        "mcserv getinfo via RPC", "total=" + std::to_string(rd32(rep, 0)) +
+        " used=" + std::to_string(rd32(rep, 4)) + " free_bytes=" + std::to_string(rpc_free));
+
+    // 11. fileio RPC dengan path mc0: (jalur yang dipakai game untuk save)
+    called = call(SRV_FILEIO, 0, str_req("mc0:/BASLUS-21503/SAVE.DAT", 1), rep, res);
+    s32 mc_rfd = (s32)rd32(rep, 0);
+    chk(called && mc_rfd >= 1000, "fileio.open mc0: via RPC", "fd=" + std::to_string(mc_rfd));
+    called = call(SRV_FILEIO, 5, u32s({(u32)mc_rfd}), rep, res);
+    chk(called && rd32(rep, 0) == 4096, "fileio.size mc0: via RPC",
+        std::to_string(rd32(rep, 0)) + " B");
+    call(SRV_FILEIO, 1, u32s({(u32)mc_rfd}), rep, res);
+
+    // 12. bukti fisik di disk host (read-after-write)
+    std::error_code fec;
+    auto hpath = std::filesystem::path(memcard::root()) / "mc0" / "BASLUS-21503" / "SAVE.DAT";
+    chk(std::filesystem::exists(hpath, fec) && (u32)std::filesystem::file_size(hpath, fec) == 4096,
+        "file save ada di disk host", hpath.string());
+
+    // 13. loadfile: word versi (fno 255) — nilai yang dibaca game @0x781ba8
+    called = call(SRV_LOADFILE, 255, {}, rep, res);
+    chk(called && rd32(rep, 0) == 0x30303133u, "loadfile fno255 = \"3100\"",
+        hex32(rd32(rep, 0)));
+
+    // 14. loadfile: LoadModule nama nyata -> file di extract/modules/irx ter-resolve
+    {
+        std::string name = "cdrom0:\\MODULES\\SIO2MAN.IRX;1";
+        std::vector<u8> req = u32s({0, 0});
+        for (char ch : name) req.push_back((u8)ch);
+        req.resize(8 + 252, 0);
+        called = call(SRV_LOADFILE, 0, req, rep, res);
+        chk(called && res == 0 && rd32(rep, 0) == 0, "loadfile LoadModule sio2man",
+            "modul=" + std::to_string(loadfile_load_count()) + " fail=" +
+            std::to_string(loadfile_load_fail_count()));
+    }
+
+    // 15. iopheap: alloc -> alamat di RAM IOP, free -> bisa dipakai ulang
+    called = call(SRV_IOPHEAP, 1, u32s({1024}), rep, res);
+    u32 hp1 = rd32(rep, 0);
+    chk(called && hp1 >= 0x00130000u && hp1 < 0x00200000u, "iopheap alloc 1024 B",
+        "addr=" + hex32(hp1));
+    call(SRV_IOPHEAP, 2, u32s({hp1}), rep, res);
+    called = call(SRV_IOPHEAP, 1, u32s({512}), rep, res);
+    chk(called && rd32(rep, 0) == hp1, "iopheap free+reuse addr sama",
+        "addr=" + hex32(rd32(rep, 0)));
+
+    // 16. sjx: create DTX (op 0x02) -> handle = buffer IOP yang dikirim game
+    called = call(SRV_SJX, 2, u32s({0, 0x003E9080u, 0x00130040u, 2176}), rep, res);
+    chk(called && rd32(rep, 0) == 0x00130040u, "sjx create DTX handle=iopbuf",
+        "handle=" + hex32(rd32(rep, 0)));
+
+    // 17. cdvdfsv (SID 0x80000597): open file disc -> ukuran nyata dari ISO
+    //     Paket 300 B: nama NUL di +36, self-ptr EE di +292, mode di +296 (kontrak server
+    //     asli m09.elf/cdvdfsv.irx). Balasan: 4 B = ukuran, + struct 36 B ke [req+292].
+    {
+        iso9660::reset();
+        bool iso = iso9660::mount("");
+        chk(iso, "iso9660 mount", iso9660::image_path());
+        auto st2 = iso9660::stat("\\SYSTEM.CNF;1");
+        std::vector<u8> req(300, 0);
+        const char* nm = "\\SYSTEM.CNF;1";
+        std::memcpy(req.data() + 36, nm, std::strlen(nm));
+        u32 ee_dst = 0x003E0000u;
+        req[292] = (u8)ee_dst; req[293] = (u8)(ee_dst >> 8);
+        req[294] = (u8)(ee_dst >> 16); req[295] = (u8)(ee_dst >> 24);
+        called = call(SRV_CDVDFS, 0, req, rep, res);
+        chk(called && rd32(rep, 0) == st2.size && st2.size > 0, "cdvfs open SYSTEM.CNF = size",
+            hex32(rd32(rep, 0)) + " vs " + std::to_string(st2.size));
+        EeWrite ew;
+        bool have_wb = take_ee_writeback(ew);
+        chk(have_wb && ew.addr == ee_dst && ew.data.size() == 36 && rd32(ew.data, 4) == st2.size,
+            "cdvfs writeback 36 B: info+4 = ukuran", "addr=" + hex32(ew.addr));
+        // file tidak ada -> reply 0, bukan ukuran karangan
+        std::vector<u8> req2 = req;
+        std::memset(req2.data() + 36, 0, 256);
+        const char* nm2 = "\\TIDAK_ADA.BIN;1";
+        std::memcpy(req2.data() + 36, nm2, std::strlen(nm2));
+        called = call(SRV_CDVDFS, 0, req2, rep, res);
+        EeWrite ew2; take_ee_writeback(ew2);
+        chk(called && rd32(rep, 0) == 0, "cdvfs open file tidak ada = 0", hex32(rd32(rep, 0)));
+        chk(cdvfs_open_ok() == 1 && cdvfs_open_miss() == 1, "cdvfs counter ok/miss",
+            std::to_string(cdvfs_open_ok()) + "/" + std::to_string(cdvfs_open_miss()));
+    }
 
     const Stats& s = stats();
     std::printf("rpc stats: calls=%llu unknown=%llu in=%llu out=%llu\n",
