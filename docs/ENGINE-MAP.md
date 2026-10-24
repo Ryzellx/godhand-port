@@ -66,7 +66,7 @@ Sumber: ELF verified + 6146 fungsi decompiled + disasm 714K baris + syscall inve
 ## 7. Peta SID SIF — terukur dari boot retail (2026-10-24)
 | SID | Server | Bukti |
 |---|---|---|
-| 0x80000001 | fileio | bind game cd=0x7816c0; fno 255 dijawab -1 (versi fileio belum diimplementasi) |
+| 0x80000001 | fileio | bind game cd=0x7816c0; fno 255 (payload 8 B = 2 pointer 0x780c40/0x781080) dijawab -1 — semantik belum diidentifikasi, bukan sekadar 'versi' |
 | 0x80000003 | iopheap (sceSifAllocIopHeap/Free) | wrapper 0x3b5968 (fno 1) & 0x3b59d8 (fno 2) |
 | 0x80000006 | loadfile (IOPRP ROMDIR idx 12) | fno 255 = word "3100"; fno 0 = LoadModule, 7 modul nyata |
 | 0x80000701 | belum dikenal (autostub) | bind setelah cri_adxi dimuat |
