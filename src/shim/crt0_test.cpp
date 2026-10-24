@@ -261,6 +261,7 @@ int main(int argc, char** argv) {
     // diagnosis (Phase 8/9): halt tepat sebelum pc tertentu, trace jendela, dump memori.
     // Semua output ke STDERR -> stdout tetap deterministik utk md5 rerun 5x.
     if (const char* h = std::getenv("GH_HALT_PC")) cpu.halt_pc = (u32)std::strtoul(h, nullptr, 0);
+    if (const char* hs = std::getenv("GH_HALT_SKIP")) cpu.halt_skip = (u32)std::strtoul(hs, nullptr, 0);
     if (const char* wt = std::getenv("GH_WATCH")) {
         std::string ww(wt); size_t dash = ww.find('-');
         eebus::watch_set((u32)std::strtoul(ww.substr(0, dash).c_str(), nullptr, 0),

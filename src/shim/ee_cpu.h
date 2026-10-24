@@ -70,6 +70,9 @@ struct Cpu {
     // halt_pc != 0 -> run() berhenti TEPAT sebelum eksekusi instruksi di alamat itu
     // (dipakai probe: lihat register hasil satu call tanpa mengubah semantik).
     u32  halt_pc = 0;
+    u32  prev_inst = 0;      // opcode instruksi terakhir yg dieksekusi (deteksi delay-slot)
+    u32  halt_skip = 0;      // lewati N hit pertama (utk membedakan panggilan ke-2 dst)
+    u32  halt_skipped = 0;
     u64  halt_hits = 0;
     // --- SIF RPC end-function callback (Phase 9) -------------------------------
     // Di HW asli _request_end() (interrupt SIF0) memanggil end_func(end_param, result)

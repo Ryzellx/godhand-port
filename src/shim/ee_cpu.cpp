@@ -147,11 +147,14 @@ static inline void fset(Cpu& c, u32 i, float v) { u32 b; std::memcpy(&b, &v, 4);
 u64 g_delay_loops = 0;
 u64 g_delay_inst  = 0;
 
-// EKSPERIMEN (belum tervalidasi): dispatch end_func di konteks EE membuat sp rusak
-// di 0x023F86F0 (di luar RAM 32 MB) — artinya model save/restore konteks di sini
-// belum meniru interrupt SIF0 dengan benar. Default MATI; hidupkan dgn GH_RPC_ENDFUNC=1
-// untuk melanjutkan riset. Antrean tetap diisi supaya bisa diukur (stats cb_queued).
-static bool g_endfunc_on = std::getenv("GH_RPC_ENDFUNC") != nullptr;
+// end-func callback = model interrupt SIF0: di HW asli _request_end() memanggil
+// end_func(end_param, result) di konteks interrupt thread pemanggil (stack thread itu).
+// Default HIDUP sejak 2026-10-24: tanpa ini libcdvd menggantung di flag busy 0x3F8674
+// (terukur: 7,1 M iterasi spin, 0 modul IOP). GH_RPC_ENDFUNC=0 mematikannya.
+static bool g_endfunc_on = [] {
+    const char* v = std::getenv("GH_RPC_ENDFUNC");
+    return !(v && v[0] == '0' && v[1] == 0);
+}();
 
 // antrean callback end-func — ukuran kecil, FIFO, nol alokasi
 namespace {
@@ -180,7 +183,10 @@ bool run(Cpu& c, SyscallFn handler, u64 max_inst) {
 
         if (eebus::g_watch_lo) eebus::g_cur_pc = cur_pc;
         // ---- halt + execution-window trace (observasi murni, nol ubah state) ----
-        if (c.halt_pc && cur_pc == c.halt_pc) { c.halt_hits++; return false; }
+        if (c.halt_pc && cur_pc == c.halt_pc) {
+            if (c.halt_skipped < c.halt_skip) { c.halt_skipped++; }
+            else { c.halt_hits++; return false; }
+        }
         if (c.trace_lo && cur_pc >= c.trace_lo && cur_pc < c.trace_hi) {
             c.trace_win_hits++;
             if (c.trace_win_hits <= c.trace_win_cap)
@@ -238,10 +244,11 @@ bool run(Cpu& c, SyscallFn handler, u64 max_inst) {
                 fflush(stdout);
             }
         }
-        u32 inst = eebus::read32(c.pc);
-        c.pc = c.next_pc;             // delay slot semantics: slot sudah diprefetch
-        c.next_pc = c.pc + 4;
-        // --- end-func callback: kembali ke titik resume kalau end_func sudah `jr ra`
+        // --- end-func callback: kembali ke titik resume kalau end_func sudah `jr ra` ---
+        // WAJIB dievaluasi SEBELUM fetch: `inst = read32(c.pc)` dulu dijalankan lebih
+        // awal, jadi sentinel (0xFFFFFFFC) sempat dibaca sebagai alamat instruksi dan
+        // restore konteks tidak pernah terjadi (terukur: callback 0x398580 `jr ra`
+        // jatuh ke 0x39857C, lalu dipanggil ulang dgn a0=6 -> loop salin 35 M).
         if (g_endfunc_on && c.cb_active && c.pc == CB_SENTINEL) {
             if (c.cb_depth > 0) {
                 Cpu::CbCtx& s = c.cb_save[--c.cb_depth];
@@ -254,9 +261,28 @@ bool run(Cpu& c, SyscallFn handler, u64 max_inst) {
             } else c.pc = c.cb_resume;
             c.next_pc = c.pc + 4;
             c.cb_active = false;
+            cur_pc = c.pc;
         }
+        const u32 prev_inst = c.prev_inst;
+        u32 inst = eebus::read32(c.pc);
+        c.pc = c.next_pc;             // delay slot semantics: slot sudah diprefetch
+        c.next_pc = c.pc + 4;
         // --- end-func callback: panggil end_func(end_param, result) seperti _request_end
-        if (!c.cb_active && g_endfunc_on) {
+        // Titik aman WAJIB: jangan ambil callback saat sedang di delay-slot branch
+        // (next_pc != pc+4 = ada target lompatan tertunda). Kalau diambil di situ,
+        // target `jr ra` hilang -> eksekusi jatuh ke instruksi berikutnya (terukur:
+        // resume di 0x3b006c menghapus return syscall 119 -> lari ke wrapper -119
+        // dengan a0=6, lalu masuk 0x398580 sebagai "deskriptor" -> tulis liar ke .text).
+        // Branch = op 0x01/0x02/0x03/0x04..0x07/0x14..0x17, atau SPECIAL funct 8/9.
+        // Instruksi tepat sesudah branch secara fisik = delay slot-nya.
+        auto is_branch_inst = [](u32 w) -> bool {
+            u32 o = w >> 26;
+            if (o == 1 || (o >= 2 && o <= 7) || (o >= 0x14 && o <= 0x17)) return true;
+            if (o == 0) { u32 f = w & 0x3F; return f == 8 || f == 9; }
+            return false;
+        };
+        const bool at_safe_point = (c.next_pc == c.pc + 4) && !is_branch_inst(prev_inst);
+        if (!c.cb_active && g_endfunc_on && at_safe_point) {
             u32 f, a, r;
             if (take_callback(f, a, r)) {
                 c.cb_resume = c.pc;
@@ -268,16 +294,28 @@ bool run(Cpu& c, SyscallFn handler, u64 max_inst) {
                     std::memcpy(s.f, c.f, sizeof(s.f));
                     s.sa = c.sa; s.facc = c.facc; s.fcsr = c.fcsr; s.resume = c.cb_resume;
                 }
+                if (std::getenv("GH_CB_DUMP")) {
+                    std::fprintf(stderr,
+                        "[cb] arg=0x%08x n1=%u n2=%u d1=0x%08x d2=0x%08x s1=0x%08x s2=0x%08x sp=0x%08x\n",
+                        a, eebus::read32(a), eebus::read32(a + 4), eebus::read32(a + 8),
+                        eebus::read32(a + 12), eebus::read32(a + 16), eebus::read32(a + 20),
+                        c.r[29][0]);
+                }
                 c.r[31][0] = CB_SENTINEL;   // ra = penanda kembali
                 c.r[4][0] = a;              // a0 = end_param
                 c.r[5][0] = r;              // a1 = result
                 c.pc = f; c.next_pc = f + 4;
                 c.cb_active = true;
-                std::fprintf(stderr, "[cb] end_func=0x%08x arg=0x%08x res=%d (dari pc=0x%08x)\n",
-                             f, a, (int)r, c.cb_resume);
+                std::fprintf(stderr, "[cb] stub 3b0060..70: %08x %08x %08x %08x %08x\n",
+                    eebus::read32(0x3b0060), eebus::read32(0x3b0064), eebus::read32(0x3b0068),
+                    eebus::read32(0x3b006c), eebus::read32(0x3b0070));
+                std::fprintf(stderr, "[cb] end_func=0x%08x arg=0x%08x res=%d (resume=0x%08x next=0x%08x prev=0x%08x instret=%llu)\n",
+                             f, a, (int)r, c.cb_resume, c.next_pc, prev_inst,
+                             (unsigned long long)c.instret);
             }
         }
         c.fault_op = inst;
+        c.prev_inst = inst;
         if (c.trace) c.trace[c.trace_pos = (c.trace_pos + 1) & c.trace_mask] = cur_pc;
 
         auto fault = [&](const char* why) { c.fault = why; c.fault_pc = c.pc; };
@@ -299,6 +337,9 @@ bool run(Cpu& c, SyscallFn handler, u64 max_inst) {
             case 0x07: w32(c, rd(inst), (u32)((s32)c.r[rt(inst)][0] >> (c.r[rs(inst)][0] & 31))); break; // srav
             case 0x08: {
                 u32 target = c.r[rs(inst)][0];
+                // sentinel return-dari-callback: 0xFFFFFFFC sengaja di atas RAM supaya
+                // tidak bisa disamai kode game; jangan dianggap "jr null".
+                if (g_endfunc_on && c.cb_active && target == CB_SENTINEL) { c.next_pc = target; break; }
                 if (target == 0 || target >= 0x02000000) {
                     // jr ke null/invalid — skip (continue ke next instruction)
                     static uint32_t jr_null = 0;
@@ -313,6 +354,7 @@ bool run(Cpu& c, SyscallFn handler, u64 max_inst) {
                 u32 t = c.r[rs(inst)][0];
                 u32 ret = cur_pc + 8;  // FIX 2026-10-19: c.pc sudah di delay slot
                 w32(c, rd(inst), ret);
+                if (g_endfunc_on && c.cb_active && t == CB_SENTINEL) { c.next_pc = t; break; }
                 if (t == 0 || t >= 0x02000000) {
                     // function pointer null/invalid — return ke caller
                     static uint32_t null_fp = 0;
@@ -856,7 +898,15 @@ bool run(Cpu& c, SyscallFn handler, u64 max_inst) {
             fault("rodata");
             return true;
         }
-        if (c.pc >= 0x02000000 || c.next_pc >= 0x02000000) {
+        // CB_SENTINEL (0xFFFFFFFC) sengaja di atas RAM: itu alamat "kembali dari
+        // end_func" (lihat jr/jalr). Jangan dianggap pc_oor — kalau kena, boot mati
+        // tepat saat callback RPC pertama (terukur: fault pc_oor @0x398580, op jr ra).
+        // Dua bentuk: pc == sentinel (delay-slot baru selesai, restore terjadi di
+        // puncak loop berikutnya) atau next_pc == sentinel (jr ke penanda, delay slot
+        // belum jalan). Keduanya sah selama callback aktif.
+        const bool cb_ret = g_endfunc_on && c.cb_active &&
+                            (c.pc == CB_SENTINEL || c.next_pc == CB_SENTINEL);
+        if (!cb_ret && (c.pc >= 0x02000000 || c.next_pc >= 0x02000000)) {
                 std::fprintf(stderr, "[CRASH] pc=0x%08x next=0x%08x instret=%llu\n",
                     c.pc, c.next_pc, (unsigned long long)c.instret);
                 std::fprintf(stderr, "[CRASH] ra=0x%08x sp=0x%08x gp=0x%08x\n",
