@@ -689,3 +689,16 @@ completion **tidak pernah dieksekusi** (probe window, 60 M): `0x323AA0` (dispatc
 main loop game di `0x200F9C`/`0x201048`, belum tercapai). Berikutnya: panggil/completion ADXF —
 `0x323F18` menghitung `0x328140(fd) - [h+0x14]`, menyetel `[h+0x20]`, lalu `0x323A00` menaikkan
 offset; setelah itu baru status 3 → VU1/render.
+
+**Addendum diagnosa (setelah commit 8750803, alat baru GH_HIST_EXACT/GH_COVER_RANGE):**
+- Store `handle+1 = 2` terjadi **380×** di 100 M, dan **380 di antaranya datang dari pc
+  `0x324140`** — bukan dari `0x323C8C`. `0x324108` = fungsi update ADXF: kalau `h[1]==2`
+  ia menyalin `fd_status = 0x328098(fd)` ke `h+1`. Artinya ADXF **sudah** memanggil jalur
+  read berulang, dan yang macet adalah **status fd object** (0x3D0DD0 +1) yang tidak pernah
+  kembali ke 1 setelah read selesai — bukan lagi masalah sisi ADXF.
+- `0x328368(fd)` (wait-idle) menunggu `fd+1 == 1`; `fd+0x24` = 0 (nol pending) tapi `fd+1`
+  tetap 2 → tidak ada yang menandai completion di level objek file.
+- `end_func` yang benar-benar dipanggil selama ini = **0x398580** (507/507 di 120 M), dan
+  fungsi itu membaca `ctx[0]` sebagai **jumlah byte** lalu menyalin dari `ctx+16`, bukan
+  layout `{prefix,trail,dst,boundary}` yang kita tulis. Kandidat kuat berikutnya: layout
+  ctx 144 B untuk jalur ini salah, sehingga handler completion tidak pernah menandai selesai.
