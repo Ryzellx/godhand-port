@@ -101,8 +101,12 @@ int main(int argc, char** argv) {
     chk(called && res == 0, "fileio.close via RPC");
 
     // 7. pad + cdvd server hidup
-    call(SRV_PAD, 1, {}, rep, res);
-    chk(res == 0 && rd32(rep, 0) == 0xFFFF, "pad state netral", hex32(rd32(rep, 0)));
+    // Kontrak fno 1 = scePadRead (bukan "state netral" saja): request 128 B word0=0x12,
+    // reply dibaca game di word[3] dan dicek (ret>>8)==4 = PAD_STATE_STABLE (0x39770c).
+    // Sebelum 2026-10-24 reply 12 B tanpa word[3] -> game mengulang 49.307x, nol render.
+    { std::vector<u8> rq(128, 0); rq[0] = 0x12; call(SRV_PAD, 1, rq, rep, res); }
+    chk(res == 0 && (rd32(rep, 12) >> 8) == 4, "pad read state STABLE",
+        hex32(rd32(rep, 12)));
     call(SRV_CDVD, 0, {}, rep, res);
     chk(res == 0 && rd32(rep, 0) == 1, "cdvd disk ready");
 

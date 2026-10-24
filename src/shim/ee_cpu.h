@@ -66,6 +66,15 @@ struct Cpu {
     u32* trace = nullptr;             // nullptr = trace mati
     u32  trace_mask = 0;              // size-1; indeks = instret & mask
     u32  trace_pos = 0;               // posisi tulis berikutnya (wraps)
+    // --- diagnosis Phase 8/9: halt + execution window trace -------------------
+    // halt_pc != 0 -> run() berhenti TEPAT sebelum eksekusi instruksi di alamat itu
+    // (dipakai probe: lihat register hasil satu call tanpa mengubah semantik).
+    u32  halt_pc = 0;
+    u64  halt_hits = 0;
+    // trace_lo < pc < trace_hi -> cetak tiap instruksi di jendela itu ke stderr
+    // (pc, word, GPR kunci). Nol efek pada state; hanya observasi.
+    u32  trace_lo = 0, trace_hi = 0;
+    u64  trace_win_hits = 0, trace_win_cap = 4000;
 
     void reset(u32 entry);
     u32  get(u32 i) const { return r[i][0]; }

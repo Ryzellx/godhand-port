@@ -344,6 +344,80 @@ adx_test 3 varian (2ch/48 kHz dari ISO: 96.224 sampel/ch, 2,005 s) · godhand_sl
 
 **6) Repo**: commit menyusul di sesi ini (lihat `git log`), mirror ledger ke `docs/`.
 
+### LOG 2026-10-24 #16 (Phase 9 buka: bug CPU MMI — dinding SJUNI/SJX jebol, boot masuk frame loop)
+
+Ringkas: dinding `ps2rna_init_psj` **bukan** kurang model SJUNI. Akarnya bug interpreter:
+opcode MMI (0x1C) di-handle stub yang menulis "rs ke rd" untuk hampir semua instruksi.
+Sesudah MMI diimplementasi benar, `SJUNI_Create` mengembalikan handle nyata dan boot lewat
+sound-init sampai frame loop (panggilan pad per frame). Semua angka di bawah dari run nyata 5×.
+
+**1) Bukti bug (bukan dugaan)**
+
+- Census statis `.text`: **2.256 situs MMI**, 312 word unik, **34 mnemonic** — yang terbesar
+  `pcpyld` 426, `paddsh` 384, `pmaxh` 272, `pminh` 272, `psrah` 260, `ppacb` 136, `paddh` 80.
+  Handler lama hanya menangani 7 nilai `fn` dan sisanya `default: w32(rd, rs)`.
+- Watchpoint tulis (instrument baru `GH_WATCH`) menunjuk **pc=0x003a532c**: itu `sq t0,0(a3)`
+  di dalam **memset libkernel (0x3a52f0)**. Nilai yang masuk ke tabel SJUNI 0x3E7FF0:
+  `00000000 01010101 00000000 00000000` per 16 B — pola rusak, karena `pcpyh`/`pcpyld`
+  (bagian dari idiom memset: `dsll 8; or; pcpyh; pcpyld; sq`) menghasilkan lane salah.
+- Akibatnya fungsi tabel SJUNI (0x33a1e8) membaca byte "+4 aktif" = 1 untuk **semua 64 slot** →
+  `SJUNI_Create` balik **0** → game masuk jalur fatal 0x337174 (`E0110104: can't creat
+  SJUNI_Creaet`) dan spin di 0x337180: **50.912.112** backward-branch di 400 M instruksi.
+
+**2) Fix: `src/shim/ee_mmi.h` — MMI R5900 lengkap**
+
+- Decode benar: `funct = inst & 0x3F` memilih kelas (MMI0 0x08 / MMI1 0x28 / MMI2 0x09 /
+  MMI3 0x29) atau op langsung (MADD/MADDU/PLZCW/MFHI1..MTLO1/MULT1/MULTU1/DIV1/DIVU1/
+  MADD1/MADDU1/PMFHL/PMTHL/PSLLH/PSRLH/PSRAH/PSLLW/PSRLW/PSRAW); sub-op = field `sa`.
+  Tabel & semantik mengikuti PCSX2 `R5900OpcodeTables.cpp` + `MMI.c` (lane LE 32-bit).
+- 128 sub-op MMI0/1/2/3 + 23 op langsung: PADDW/PSUBW/PCGTW/PMAXW/PADDH/…/PPAC5,
+  PABSW/PCEQW/PMINW/PADSBH/…/QFSRV, PMADDW/PSLLVW/PMRLVW/PMFHI/PMFLO/PINTH/PDIVW/PCPYLD/
+  PMADDH/PHMADH/PAND/PXOR/PHMSBH/PEXEH/PREVH/PMULTH/PDIVBW/PEXEW/PROT3W, PMADDUW/PSRAVW/
+  PMTHI/PMTLO/PINTEH/PMULTUW/PDIVUW/PCPYUD/POR/PNOR/PEXCH/PCPYH/PEXCW.
+- **Slot yang tak terdefinisi di tabel → `exec()` balik false → CPU fault "MMI unknown".**
+  Tidak ada lagi tulisan karangan: instruksi ilegal harus terlihat, bukan disembunyikan.
+- `pc > rd` write dilakukan lewat salinan `s[]/t[]/d[]` supaya aliasing rd==rs/rt aman.
+
+**3) Bukti fix (berurutan, tiap langkah dari run nyata)**
+
+| Langkah | Sebelum | Sesudah |
+|---|---|---|
+| tulis memset ke 0x3E7FF0 | `00000000 01010101 00000000 00000000` | `00000000 00000000 00000000 00000000` (zero-fill benar) |
+| `SJUNI_Create` (0x33a190) | `v0 = 0` → spin 0x337180 | `v0 = 0x003E7FF0`, slot terisi `003e7fb8 / 00000101 / 00455ba8 / 003e0a68` |
+| dinding berikut | 0x337180 (SJUNI) | 0x3371E0 → `E0100401: can't create SJX of IOP` |
+| setelah model SJX_Create | — | lewat; **9 modul IOP** dimuat (termasuk mcman 103.680 B + mcserv 7.744 B) |
+| dinding berikut | — | pad read: **49.307** call RPC di 400 M, nol render |
+
+**4) Dua model baru (ditandai MODEL, bukan klaim implementasi asli)**
+
+- **SJX op 0x00 = SJX_Create** (payload `{sjunihandle, iopbuf, 1, tabelptr}`, terukur lewat
+  `GH_DUMP_SID`). Model: alokasi **nyata 64 B** dari alokator heap IOP (0x130000..0x200000) →
+  handle berbeda tiap panggilan (0x182140, 0x182180, …). Tanpa ini game berhenti di 0x33b4e4.
+- **pad fno 1 = scePadRead**: request 128 B word0=0x12, reply dibaca game di `word[3]` lalu
+  dicek `(ret >> 8) == 4` di **0x39770C** (= `PAD_STATE_STABLE`). Reply lama 12 B tanpa word[3]
+  → ret 0 → game ulang terus. Reply baru: `word[3] = (4<<8) | port`. Efek terukur:
+  call RPC **49.307 → 69**, bind 98.492 → 10, dan `sema-autosig` 147.551 → 0.
+
+**5) Frontir sekarang (jujur, belum selesai)**
+
+400 M instruksi berhenti di `pc=0x003A5938` — di dalam libc game: `strlen` (0x3A5A00,
+`lb/bnezl`) dan zero-fill byte-per-byte (0x3A5F48, `sb zero`). 30% sampel hot-PC di
+0x3A5F48..0x3A5F5C. **Render belum tercapai**: `gif kicks` tetap 16.384 (census Phase 7c) di
+100 M maupun 400 M, `actions=0`. Jadi yang terbukti baru: rantai game→MMIO→GIF parser bersih,
+bukan frame tergambar.
+
+**6) Instrumentasi baru di `crt0_test` (semua ke stderr, stdout tetap deterministik)**
+
+`GH_HALT_PC` (stop tepat sebelum pc) · `GH_TRACE_WINDOW=lo-hi` (trace per instruksi + GPR kunci) ·
+`GH_WATCH=lo-hi` (+`GH_WATCH_CAP`) watchpoint tulis dengan pc penulis · `GH_DUMP_MEM=addr:len,…` ·
+`GH_DUMP_SID=0x…` dump payload RPC per server · `MMI_DEBUG` trace decode MMI.
+
+**7) Test floor (5× berturut, md5 stdout identik)**
+
+`mmi_test 25/25` (baru) · `sif_test 36/36` · `sif_dma_test 10/10` · `shim_test ALL` ·
+`bus_test ALL` · `gif_test 6/6` · `adx_test` 1 file ISO 2ch/48 kHz rc=0 ·
+`crt0_test 30M` & `400M` deterministik (md5 `ac61eb8f4d8b`), stop `clean-cap` tanpa fault.
+
 ## PROTOTYPE INTEL — God Hand Preview (Jun 20, 2006)
 Sumber: hiddenpalace.org, arsip 421.407.373 B (7z) berisi bin 1.261.928.448 B (MODE1/2048).
 ELF: `SLPM_665.50` (JP preview), 3.450.144 B, md5 `b203e5aec76b009a1f4d594f869ca157`.

@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 #include <chrono>
 #include <vector>
 #include <algorithm>
@@ -257,11 +258,54 @@ int main(int argc, char** argv) {
     eebus::write32(ROMH + 0x20c, eebus::read32(0x3b64a8));  // pat1 = kata @VMA 0x3b64a8
     eebus::write32(ROMH + 0x168, eebus::read32(0x3b6470));  // pat2 = kata @VMA 0x3b6470
 
+    // diagnosis (Phase 8/9): halt tepat sebelum pc tertentu, trace jendela, dump memori.
+    // Semua output ke STDERR -> stdout tetap deterministik utk md5 rerun 5x.
+    if (const char* h = std::getenv("GH_HALT_PC")) cpu.halt_pc = (u32)std::strtoul(h, nullptr, 0);
+    if (const char* wt = std::getenv("GH_WATCH")) {
+        std::string ww(wt); size_t dash = ww.find('-');
+        eebus::watch_set((u32)std::strtoul(ww.substr(0, dash).c_str(), nullptr, 0),
+                         dash == std::string::npos ? 0 : (u32)std::strtoul(ww.substr(dash + 1).c_str(), nullptr, 0));
+        if (const char* cap = std::getenv("GH_WATCH_CAP")) eebus::g_watch_cap = std::strtoull(cap, nullptr, 0);
+    }
+    if (const char* w = std::getenv("GH_TRACE_WINDOW")) {
+        std::string ww(w); size_t dash = ww.find('-');
+        cpu.trace_lo = (u32)std::strtoul(ww.substr(0, dash).c_str(), nullptr, 0);
+        cpu.trace_hi = dash == std::string::npos ? cpu.trace_lo + 4 : (u32)std::strtoul(ww.substr(dash + 1).c_str(), nullptr, 0);
+    }
+
     auto t0 = std::chrono::steady_clock::now();
     bool stopped = eecpu::run(cpu, sys_handler, cap);  // main-loop long-run
     auto t1 = std::chrono::steady_clock::now();
     double sec = std::chrono::duration<double>(t1 - t0).count();
 
+    if (cpu.halt_hits) {
+        std::fprintf(stderr, "[HALT] pc=0x%08x hits=%llu instret=%llu\n",
+                     cpu.pc, (unsigned long long)cpu.halt_hits, (unsigned long long)cpu.instret);
+        static const char* rn_[32] = {"zr","at","v0","v1","a0","a1","a2","a3","t0","t1","t2","t3",
+            "t4","t5","t6","t7","s0","s1","s2","s3","s4","s5","s6","s7","t8","t9","k0","k1",
+            "gp","sp","fp","ra"};
+        for (int i = 1; i < 32; i++)
+            if (cpu.r[i][0] || i == 2 || i == 29 || i == 31)
+                std::fprintf(stderr, "  %-2s = 0x%08x\n", rn_[i], cpu.r[i][0]);
+        if (const char* dm = std::getenv("GH_DUMP_MEM")) {
+            std::string all(dm); size_t pos = 0;
+            while (pos < all.size()) {
+                size_t comma = all.find(',', pos);
+                std::string it = all.substr(pos, comma == std::string::npos ? std::string::npos : comma - pos);
+                size_t colon = it.find(':');
+                u32 a = (u32)std::strtoul(it.substr(0, colon).c_str(), nullptr, 0);
+                u32 n = colon == std::string::npos ? 16 : (u32)std::strtoul(it.substr(colon + 1).c_str(), nullptr, 0);
+                for (u32 o = 0; o < n; o += 16) {
+                    std::fprintf(stderr, "  [%08x]", a + o);
+                    for (u32 k = 0; k < 16 && o + k < n; k += 4)
+                        std::fprintf(stderr, " %08x", eebus::read32(a + o + k));
+                    std::fprintf(stderr, "\n");
+                }
+                if (comma == std::string::npos) break;
+                pos = comma + 1;
+            }
+        }
+    }
     std::printf("crt0 run: instret=%llu stop=%s pc=0x%08x fault_pc=0x%08x fault_op=%08x\n",
                 (unsigned long long)cpu.instret,
                 cpu.fault ? cpu.fault : "clean-cap", cpu.pc, cpu.fault_pc, cpu.fault_op);

@@ -4,10 +4,22 @@
 #include "ee_kernel.h"
 
 #include <cstring>
+#include <cstdio>
+#include <cstdlib>
 #include <vector>
 
 namespace eebus {
+u32 g_watch_lo = 0, g_watch_hi = 0, g_cur_pc = 0;
+u64 g_watch_hits = 0, g_watch_cap = 200;
+void watch_set(u32 lo, u32 hi) { g_watch_lo = lo; g_watch_hi = hi; }
+
 namespace {
+inline void watch_log(u32 addr, u32 val, int sz) {
+    if (!g_watch_lo || addr < g_watch_lo || addr >= g_watch_hi) return;
+    g_watch_hits++;
+    if (g_watch_hits <= g_watch_cap)
+        std::fprintf(stderr, "[WW] pc=%08x addr=%08x val=%08x sz=%d\n", g_cur_pc, addr, val, sz);
+}
 
 std::vector<u8> g_ram;      // lazily allocated 32 MB
 u32 g_chcr = 0, g_madr = 0, g_qwc = 0, g_tadr = 0;
@@ -149,16 +161,19 @@ void write8(u32 addr, u8 v) {
         if (addr == 0x1000F180) g_gif_busy = 6;  // kick GIF -> sibuk 6 poll
         return;
     }
+    watch_log(addr, v, 1);
     u32 off = addr & RAM_MASK;
     if (off < RAM_SIZE) ram()[off] = v;
 }
 void write16(u32 addr, u16 v) {
     if (is_mmio(addr)) return;
+    watch_log(addr, v, 2);
     u32 off = addr & RAM_MASK;
     if (off + 2 <= RAM_SIZE) { ram()[off] = v & 0xFF; ram()[off+1] = (v >> 8) & 0xFF; }
 }
 void write32(u32 addr, u32 v) {
     if (is_mmio(addr)) { mmio_write32(addr, v); return; }
+    watch_log(addr, v, 4);
     u32 off = addr & RAM_MASK;
     if (off + 4 <= RAM_SIZE) std::memcpy(ram().data() + off, &v, 4);
 }

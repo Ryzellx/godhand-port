@@ -2,3 +2,4 @@ build/
 out/*.ppm
 out/*.spv
 *.o
+build-dbg/

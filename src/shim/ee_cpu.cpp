@@ -5,6 +5,7 @@
 // LQ op 0x1E, imm16 penuh 16-aligned). Unaligned LWL/LWR/SWL/SWR/SDL/SDR/LDL/LDR
 // pakai tabel byte-level MIPS LE klasik.
 #include "ee_cpu.h"
+#include "ee_mmi.h"
 #include <cstdio>
 #include <cmath>
 #include <cstring>
@@ -149,6 +150,20 @@ u64 g_delay_inst  = 0;
 bool run(Cpu& c, SyscallFn handler, u64 max_inst) {
     while (c.instret < max_inst) {
         u32 cur_pc = c.pc;
+
+        if (eebus::g_watch_lo) eebus::g_cur_pc = cur_pc;
+        // ---- halt + execution-window trace (observasi murni, nol ubah state) ----
+        if (c.halt_pc && cur_pc == c.halt_pc) { c.halt_hits++; return false; }
+        if (c.trace_lo && cur_pc >= c.trace_lo && cur_pc < c.trace_hi) {
+            c.trace_win_hits++;
+            if (c.trace_win_hits <= c.trace_win_cap)
+                std::fprintf(stderr,
+                    "[W]%llu pc=%08x inst=%08x v0=%08x v1=%08x a0=%08x a1=%08x a2=%08x a3=%08x "
+                    "s0=%08x s1=%08x sp=%08x ra=%08x\n",
+                    (unsigned long long)c.instret, cur_pc, eebus::read32(cur_pc),
+                    c.r[2][0], c.r[3][0], c.r[4][0], c.r[5][0], c.r[6][0], c.r[7][0],
+                    c.r[16][0], c.r[17][0], c.r[29][0], c.r[31][0]);
+        }
 
         // ---- Phase 7b.9: busy-delay fast-forward -------------------------
         // Idiom game (contoh 0x399190): addiu rt,rt,-1 ; 4x nop ; bne rt,rs,<self>
@@ -311,19 +326,6 @@ bool run(Cpu& c, SyscallFn handler, u64 max_inst) {
             case 0x3C: w64(c, rd(inst), g64(c, rt(inst)) << (sa_f(inst) + 32)); break; // dsll32
             case 0x3E: w64(c, rd(inst), g64(c, rt(inst)) >> (sa_f(inst) + 32)); break; // dsrl32
             case 0x3F: w64(c, rd(inst), (u64)((s64)g64(c, rt(inst)) >> (sa_f(inst) + 32))); break; // dsra32
-        case 0x1C: {  // SPECIAL2 (MMI)
-            u32 f = fn(inst) & 0x3F;
-            switch (f) {
-            case 0x28: w32(c, rd(inst), c.r[rs(inst)][0] + c.r[rt(inst)][0]); break; // padduw
-            case 0x29: w32(c, rd(inst), c.r[rs(inst)][0] - c.r[rt(inst)][0]); break; // psubuw
-            case 0x00: w32(c, rd(inst), c.r[rs(inst)][0]); break;
-            case 0x01: w32(c, rd(inst), c.r[rs(inst)][0]); break;
-            case 0x20: w32(c, rd(inst), c.r[rs(inst)][0] + c.r[rt(inst)][0]); break;
-            case 0x21: w32(c, rd(inst), c.r[rs(inst)][0] - c.r[rt(inst)][0]); break;
-            default: w32(c, rd(inst), c.r[rs(inst)][0]); break;
-            }
-            break;
-        }
         default: fault("SPECIAL fn unknown"); return true;
             }
             break;
@@ -717,17 +719,13 @@ bool run(Cpu& c, SyscallFn handler, u64 max_inst) {
             break;
         }
         
-        case 0x1C: {  // SPECIAL2 (MMI)
-            u32 f = fn(inst) & 0x3F;
-            switch (f) {
-            case 0x28: w32(c, rd(inst), c.r[rs(inst)][0] + c.r[rt(inst)][0]); break; // padduw
-            case 0x29: w32(c, rd(inst), c.r[rs(inst)][0] - c.r[rt(inst)][0]); break; // psubuw
-            case 0x00: w32(c, rd(inst), c.r[rs(inst)][0]); break;
-            case 0x01: w32(c, rd(inst), c.r[rs(inst)][0]); break;
-            case 0x20: w32(c, rd(inst), c.r[rs(inst)][0] + c.r[rt(inst)][0]); break;
-            case 0x21: w32(c, rd(inst), c.r[rs(inst)][0] - c.r[rt(inst)][0]); break;
-            default: w32(c, rd(inst), c.r[rs(inst)][0]); break;
-            }
+        case 0x1C: {  // MMI (R5900 multimedia) — decode + eksekusi penuh di ee_mmi.h
+            // 2026-10-24: blok ini dulu stub ("tulis rs ke rd") -> SELURUH op MMI salah.
+            // .text game punya 2256 situs MMI statis: pcpyld 426, paddsh 384, pmaxh 272,
+            // pminh 272, psrah 260, ppacb 136, ... Bukti kerusakan: memset libkernel
+            // (0x3a52f0, pcpyh+pcpyld) menulis 0x01010101 ke tabel SJUNI 0x3e7ff0 ->
+            // semua 64 slot "sibuk" -> SJUNI_Create=0 -> hang fatal 0x337180.
+            if (!mmi::exec(c, inst)) { fault("MMI unknown"); return true; }
             break;
         }
         default:

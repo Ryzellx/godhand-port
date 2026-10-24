@@ -77,3 +77,24 @@ Sumber: ELF verified + 6146 fungsi decompiled + disasm 714K baris + syscall inve
 Catatan model: `cd` (SifRpcClientData) game = {+0 pkt_addr, +4 rpc_id, +8 sema_id, +20 buf,
 +24 cbuf, +36 server}. `rec_id` bit0 = request aktif, bit1 = selesai (dibuktikan `is_busy()`
 @0x3b3328). Paket `sifcmd` EE→IOP didecode dari salinan RAM IOP (dua-pass kick).
+
+## 7. MMI R5900 di kode game (census 2026-10-24)
+
+- **2.256 situs opcode 0x1C** (312 word unik, 34 mnemonic) di `.text` (0x100000..0x3BBF20).
+  Terbesar: `pcpyld` 426 · `paddsh` 384 · `pmaxh` 272 · `pminh` 272 · `psrah` 260 · `ppacb` 136
+  · `paddh` 80 · `psrlh` 50 · `qfsrv` 42 · `mult1` 39 · `pextlb` 36 · `pand` 35 · `madd` 31
+  · `pnor` 30 · `padduw` 29 · `pcpyud` 25 · `por` 23 · `pextub` 18 · `psubb` 15 …
+- Decode kelas: `funct = inst & 0x3F` → MMI0 (0x08) / MMI1 (0x28) / MMI2 (0x09) / MMI3 (0x29),
+  atau op langsung (MADD/MADDU/PLZCW/MFHI1..MTLO1/MULT1/MULTU1/DIV1/DIVU1/MADD1/MADDU1/
+  PMFHL/PMTHL/PSLLH/PSRLH/PSRAH/PSLLW/PSRLW/PSRAW). Sub-op = field `sa` (bit 10..6).
+- **libc game**: `memset` @0x3A52F0 (jalur MMI: `dsll 8` + `or` + `pcpyh` + `pcpyld` + 2× `sq`
+  32 B/iterasi), `strlen` @0x3A5A00, zero-fill byte @0x3A5F48, `memcpy` LQ/SQ @0x3A5280.
+- **Tabel runtime penting**: tabel SJUNI 64 entri × 0x34 @`0x3E7FF0` (byte +4 = aktif,
+  +5 = kanal, +0x0C = arg, +0x28 = ptr fungsi, +0x2C = self); tabel vtable 0x33A2D0.. di
+  `0x3E7FC0`; tabel stream SJX 32 entri × 0x14 @`0x3F8DE8`; tabel argumen RPC `0x7561C0`.
+- **Pemeriksaan status pad**: fungsi 0x398468 → `SifCallRpc(cd=0x77C0C0, fno=1, 128 B, 128 B)`,
+  caller @0x39770C menilai `(reply[3] >> 8) == 4` (PAD_STATE_STABLE) — kalau bukan, cetak
+  error 0x46E038/0x46E060 lalu ulangi.
+- **SID terpakai saat boot** (dari log BIND): 0x80000100/0x80000101 (pad), 0x80000001 (fileio),
+  0x80000003 (iopheap), 0x80000006 (loadfile), 0x80000400 (mcserv), 0x90000200 (SJX/CRI),
+  0x80000592 & 0x19720317 & 0x80000701 (autostub — belum diidentifikasi).

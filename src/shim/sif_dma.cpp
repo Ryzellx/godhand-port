@@ -304,6 +304,17 @@ u32 kick(u32 sdd_addr, u32 count) {
                     for (size_t k = 0; k < payload.size() && k < 64; k++) std::fprintf(stderr, " %02x", payload[k]);
                     std::fprintf(stderr, "\n");
                 }
+                if (const char* want = getenv("GH_DUMP_SID")) {
+                    u32 w = (u32)std::strtoul(want, nullptr, 0);
+                    if (sid == w) {
+                        std::fprintf(stderr, "[payload sid=%08x fno=%u n=%zu] ", sid, fno, payload.size());
+                        for (size_t k = 0; k < payload.size() && k < 192; k++) {
+                            u8 ch = payload[k];
+                            std::fputc((ch >= 32 && ch < 127) ? ch : '.', stderr);
+                        }
+                        std::fprintf(stderr, "\n");
+                    }
+                }
                 if (getenv("GH_SIF_DUMP"))
                     std::fprintf(stderr, "[call] payload dari %s (cd->buf=0x%08x seq=%llu, pkt+64=0x%08x seq=%llu) n=%zu\n",
                                  src_used, sendbuf, (unsigned long long)sc, cand_pkt, (unsigned long long)sp, payload.size());

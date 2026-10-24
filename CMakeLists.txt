@@ -149,3 +149,13 @@ add_executable(sif_dma_test
   src/shim/ee_kernel.cpp)
 target_include_directories(sif_dma_test PRIVATE src/shim)
 target_link_libraries(sif_dma_test PRIVATE Threads::Threads)
+
+# mmi_test: unit test MMI R5900 (opcode 0x1C) — mengunci fix stub 2026-10-24
+add_executable(mmi_test
+  src/shim/mmi_test.cpp
+  src/shim/ee_cpu.cpp
+  src/shim/ee_bus.cpp
+  src/shim/ee_kernel.cpp
+  src/shim/host_io.cpp)
+target_include_directories(mmi_test PRIVATE src/shim)
+target_link_libraries(mmi_test PRIVATE Threads::Threads)

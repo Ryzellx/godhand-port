@@ -50,4 +50,11 @@ struct Stats {
 };
 const Stats& stats();
 
+// --- debug: watchpoint tulis (diagnosis Phase 8/9) -------------------------
+// watch_lo < addr < watch_hi -> cetak [WW] pc/addr/val ke stderr. pc diisi CPU
+// tiap instruksi lewat g_cur_pc (hanya saat watch aktif, biaya nol di jalur normal).
+extern u32 g_watch_lo, g_watch_hi, g_cur_pc;
+extern u64 g_watch_hits, g_watch_cap;
+void watch_set(u32 lo, u32 hi);
+
 } // namespace eebus

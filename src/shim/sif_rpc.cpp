@@ -89,6 +89,19 @@ bool decode(const std::vector<u8>& pkt, Header& h, std::vector<u8>& payload) {
 
 bool call(u32 server, u32 func, const std::vector<u8>& req, std::vector<u8>& reply, s32& result_out) {
     g_st.calls++;
+    if (const char* want = std::getenv("GH_DUMP_SID")) {
+        if (server == (u32)std::strtoul(want, nullptr, 0)) {
+            static int shown = 0;
+            if (shown++ < 8) {
+                std::fprintf(stderr, "[DUMP sid=%08x fno=%u n=%zu] ", server, func, req.size());
+                for (size_t k = 0; k < req.size() && k < 200; k++) {
+                    u8 ch = req[k];
+                    std::fputc((ch >= 32 && ch < 127) ? ch : '.', stderr);
+                }
+                std::fprintf(stderr, "\n");
+            }
+        }
+    }
     g_st.bytes_in += req.size();
     auto it = g_srv.find(server);
     if (it == g_srv.end()) { g_st.unknown++; result_out = -1; reply.clear(); return false; }
@@ -218,12 +231,30 @@ static s32 mcserv_handler(u32 func, const std::vector<u8>& req, std::vector<u8>&
 }
 
 // ---------------------------------------------------------------- pad
-static s32 pad_handler(u32 func, const std::vector<u8>&, std::vector<u8>& reply) {
+// padman (SID 0x80000100 = pad utama, 0x80000101 = server kedua/multitap).
+// fno 0 = scePadInit/bind-reply, fno 1 = scePadRead: request 128 B dengan word0 =
+// 0x12, reply dibaca caller di word[3] dan dicek `(ret >> 8) == 4` (0x39770c-0x397710)
+// = PAD_STATE_STABLE(4) di libpad; kalau != 4 game mencetak error 0x46e038/0x46e060
+// lalu MENGULANG panggilan -> terukur 49.307 call di 400 M instruksi tanpa render.
+// Jadi word[3] WAJIB 0x000004xx (state 4 << 8 | port 0). 8 bit bawah = kode port/err.
+static s32 pad_handler(u32 func, const std::vector<u8>& req, std::vector<u8>& reply) {
     if (func == 0) { put32(reply, 1); return 0; }
     if (func == 1) {
-        put32(reply, 0xFFFF);   // tombol aktif-low: semua lepas
-        put32(reply, 0x7F7F);
-        put32(reply, 0x7F7F);
+        u32 port = 0;                                  // word[3] low byte = port/err
+        const char* envp = std::getenv("GH_PAD_PORT");
+        if (envp) port = (u32)std::strtoul(envp, nullptr, 0) & 0xFFu;
+        size_t cap = req.size() >= 16 ? (req.size() < 128 ? req.size() : 128) : 16;
+        reply.assign(cap, 0);
+        auto w = [&](size_t off, u32 v) {
+            if (off + 4 <= reply.size()) {
+                reply[off] = (u8)v; reply[off + 1] = (u8)(v >> 8);
+                reply[off + 2] = (u8)(v >> 16); reply[off + 3] = (u8)(v >> 24);
+            }
+        };
+        w(0, 0x12);                                    // echo command word request
+        w(4, 0x0000FFFFu);                             // tombol port 0 (aktif-low, lepas)
+        w(8, 0x00007F7Fu);                             // axis X/Y netral
+        w(12, (4u << 8) | port);                       // state STABLE(4) << 8 | port
         return 0;
     }
     return -1;
@@ -400,6 +431,18 @@ s32 sjx_handler(u32 func, const std::vector<u8>& req, std::vector<u8>& reply) {
         std::fprintf(stderr, "[sjx] op=0x%02x argc=%zu:", op, a.size());
         for (size_t i = 0; i < a.size() && i < 12; i++) std::fprintf(stderr, " %08x", a[i]);
         std::fprintf(stderr, "\n");
+    }
+    if (op == 0x00) {                       // SJX_Create (E0100401 di 0x455e20 dipakai 0x33b4e8)
+        // Payload terukur (dump GH_SIF_DUMP): {sjunihandle, iopbuf, 1, tabelptr}.
+        // Server IOP asli membuat objek SJX di heap IOP lalu balik handle != 0.
+        // MODEL: alokasi nyata 64 B dari alokator heap IOP (0x130000..0x200000) —
+        // bukan angka karangan, dan tiap panggilan dapat alamat berbeda.
+        u32 h = iopheap_alloc(64);
+        if (!h) { put32(reply, 0); return -1; }
+        g_sjx_obj[h] = 64; g_sjx_create++;
+        std::fprintf(stderr, "[sjx] op=0x00 SJX_Create -> handle 0x%08x (64 B heap IOP)\n", h);
+        put32(reply, h);
+        return 0;
     }
     if (op == 0x02 || op == 0x22) {         // 0x02 = create DTX, 0x22 = SJUNI_CreateRmt
         // op 0x02: args={0, workbufEE, iopbuf, size} -> iopbuf = a[2]
