@@ -516,8 +516,116 @@ CRI + metadata loop.
   belum teridentifikasi) dan belum ada output SPU2 — decoder berdiri sendiri + sink buang/WAV.
 - Loop baru **dilaporkan**, belum **diputar**: belum ada carry predictor state saat lompat dari
   `loop_end` ke `loop_start` (perlu restore history per channel di titik loop).
+  → **ditutup di Phase 9b** (log di bawah): tiga hipotesis state diuji, satu menang byte-exact.
 - Resampling 24 kHz → laju output game belum ada (8 stream 24 kHz).
 - Audio non-ADX belum disentuh: stream MPEG/SND dan audio di dalam SFD/PSS.
 - Encoding type 2/4 hanya terbukti di vektor sintetis (title ini 100% type 3).
 - `--tmp` di `/dev/shm` = data sementara hilang saat reboot; bukan masalah untuk test, tapi
   jangan dipakai untuk cache aset.
+
+### LOG 24 Okt 2026 — Phase 9b: loop benar-benar DIPUTAR (timeline splice) + sink WAV
+
+**1) Yang diserang**
+
+Phase 9a berhenti di "loop dilaporkan": flag/start/end dari header sudah benar dan cocok dengan
+metadata vgmstream, tapi belum ada jalur yang benar-benar menyambung `loop_end → loop_start`.
+Untuk port, artinya musik 2 menit mati di titik loop. Sekarang `AdxDecoder::render_loop()`
+membangun timeline putar: intro `[0, loop_end)` + N body `[loop_start, loop_end)` + tail
+`[loop_end, sample_count)`.
+
+**2) Semantik vgmstream dikalibrasi dulu (bukan diasumsikan)**
+
+`vgmstream-cli -l N.0 -F` ternyata **bukan** "N kali loop". Diukur pada `adx_m66_0000`
+(48 kHz, 6.369.200 sampel, loop 471.744..6.163.980, body 5.692.236, tail 205.220):
+
+| `-l` | sampel output | arti |
+|---|---|---|
+| 1.0 | 6.369.200 | satu pass murni (tanpa body tambahan) |
+| 2.0 | 12.061.436 | 6.369.200 + 5.692.236 → intro + **1** body + tail |
+| 3.0 | 17.753.672 | 6.369.200 + 2 x 5.692.236 → intro + **2** body + tail |
+
+Jadi `-l N` = `N-1` body tambahan; gate kita memakai `loops` (body tambahan) dan memanggil
+vgmstream dengan `-l loops+1`. Tanpa `-F`, vgmstream menambah fade 10 s dan perbandingan
+byte-exact mustahil.
+
+**3) Tiga hipotesis state prediktor diadu, bukan dipilih selera**
+
+Saat lompat, decoder harus tahu isi history 2-tap per kanal. Tiga kemungkinan diimplementasi
+terpisah (`AdxLoopState`): `Carry` (history dari sampel sebelum `loop_end`), `ResetHeader`
+(reseed dari header 0x18/0x1c), `Linear` (body diambil apa adanya dari decode linear, yaitu
+history "seolah tidak ada lompat"). Diuji otomatis di 45 file ber-loop, `--loop-state auto`:
+
+| state | byte-exact vs vgmstream | catatan |
+|---|---|---|
+| Linear | **45/45** | 0 sampel beda di 1.013.813.378 sampel per run |
+| Carry | 0/45 | SNR 44–81 dB; selisih hanya di beberapa frame setelah lompat |
+| ResetHeader | 0/45 | SNR ~45–53 dB |
+
+- Carry vs Linear: **93.798 sampel** beda dari 1.013.813.378 (**0,0093%**), |Δ| maks **34.843**
+  LSB di `adx_m66_0020` (34.933.606 sampel ter-render). Selisih itu transient yang meluruh,
+  bukan offset permanen.
+- Seam `|x[loop_end] - x[loop_end-1]|` di titik sambung: Carry lebih kecil di **36/45** file
+  (median 856 vs 1.803 LSB), sedangkan p99.9 step normal di dalam body = 25.913 LSB. Artinya
+  **kedua** state jauh di bawah transient normal → tidak ada klik; Carry cuma sedikit lebih
+  mulus. Linear di bawah p99.9 di 44/45, Carry di 45/45.
+
+**4) Keputusan default (dan batasnya)**
+
+Default port = **Linear**, karena satu-satunya yang byte-exact dengan decoder referensi
+independen dan membuat body loop identik dengan pass pertama (persis yang dikodekan encoder).
+`--loop-state carry` tersedia untuk eksperimen. Ini **pilihan referensi, bukan klaim hardware**:
+library ADX asli yang dipakai game (`adxps2`/ADXPLAY di IOP) belum di-RE, jadi belum terbukti
+apakah hardware membawa history atau re-seek. Selisih terukur 0,0093% sampel, jadi risiko
+audible-nya kecil, tapi statusnya tetap "belum diputuskan oleh hardware".
+
+**5) Detail implementasi yang tidak sepele**
+
+- `loop_end` **tidak** frame-aligned di **28/45** file (contoh 6.163.980 = 192.624,375 frame),
+  sementara `loop_start` aligned di **45/45**. Decoder yang maju per frame akan overshoot melewati
+  titik lompat, jadi state tepat di `loop_end` direkonstruksi: `decode_frame()` sekarang bisa
+  menangkap history setelah `hist_at` sampel, dipanggil ulang dari **snapshot state awal frame**.
+- `render_loop()` memakai cache frame + snapshot entry state, jadi loop ke-2 tidak men-decode
+  ulang dari sampel 0 (biaya render 45 file x 2 loop = 1,01 miliar sampel tetap ~40% dari wall run).
+- Stream non-loop jatuh ke `decode_trimmed()`; `loops=0, tail=false` dipakai untuk prelisten.
+- Sink WAV baru `adx_write_wav()` (RIFF, fmt 16, data s16le). Verifikasi: `ffprobe` pada hasil
+  `adx_m1070_0000.wav` → `pcm_s16le 48000 Hz 2 ch`, durasi 2,770646 s = 132.991 sampel; decode
+  balik lewat ffmpeg menghasilkan 531.964 B = 132.991 x 2 x 2 (cocok byte).
+
+**6) Hasil run (angka nyata)**
+
+5x berturut, 367 file, gate vgmstream + loop render (`--no-ffmpeg`, karena parity ffmpeg sudah
+di-gate terpisah di bawah):
+
+| run | exit | pass | vgmstream exact | loop render exact | sampel loop | wall |
+|---|---|---|---|---|---|---|
+| 1 | 0 | 367/367 | 367/367 | 45/45 | 1.013.813.378 | 5:22,97 |
+| 2 | 0 | 367/367 | 367/367 | 45/45 | 1.013.813.378 | 5:13,84 |
+| 3 | 0 | 367/367 | 367/367 | 45/45 | 1.013.813.378 | 9:19,86 |
+| 4 | 0 | 367/367 | 367/367 | 45/45 | 1.013.813.378 | 10:31,93 |
+| 5 | 0 | 367/367 | 367/367 | 45/45 | 1.013.813.378 | 4:58,89 |
+
+- Body log 5 run **identik**: sha1 `1343b6bbf7b10659d808e56ee0ae0ab2e57fe384` (685 baris),
+  baris SUMMARY sha1 `d5c79759fe3ad48c1c37f7aed7128f4a7024ba00`.
+- VPS ini **1 vCPU / 2 GB**; wall run 3-4 hampir 2x karena verifikasi AdxStream berjalan paralel
+  di core yang sama. Angka determinisme diambil dari isi log, bukan dari wall time.
+- 1x run penuh (ffmpeg + vgmstream + synth), wall 929,23 s (sesi sebelumnya; log-nya tidak ikut
+  di-commit, angka `trimmed_samples_total` di bawah ini yang mengonfirmasi): `pass=367 fail=0`,
+  `ffmpeg_exact=367/367`, `vgmstream_exact=367/367`, `looprender_exact=45/45`,
+  `synth_failures=0`, `trimmed_samples_total=572.592.917`, body sha1 `0765447d3b166fca`.
+  → tidak ada regresi di jalur lama; `decode_frame` default behavior tidak berubah (parameter
+  history capture opsional, default off).
+- Sampel rate title: 359 stream 48 kHz, 8 stream 24 kHz (belum di-resample; lihat "belum").
+- Reproduksi:
+  `./build/adx_test --loop-render --loop-state linear --loops 2 --wav /dev/shm/ghwav --synth
+  --vgmstream /root/.hermes/tools/vgmstream/vgmstream-cli`
+
+**7) Yang belum (jujur)**
+
+- Sumber kebenaran loop di **hardware**: `adxps2`/ADXPLAY di IOP God Hand belum dibedah, jadi
+  Carry vs Linear belum diputuskan oleh mesin aslinya (default sekarang = referensi).
+- Mixing/DSP, sound RPC (`sid` 0x80000006/0x80000592), dan output SPU2 belum ada.
+- Resampling 24 kHz → laju output game belum ada (8 stream).
+- Audio non-ADX belum disentuh: MPEG/SND di AFS dan audio dalam SFD/PSS.
+- Encoding type 2/4 hanya terbukti di vektor sintetis (title ini 100% type 3).
+- `render_loop` mengalokasikan output penuh (loop 2x file terbesar = ~140 MB); untuk streaming
+  runtime perlu versi ring-buffer per frame, bukan vektor penuh.

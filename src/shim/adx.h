@@ -81,6 +81,28 @@ struct AdxHeader {
 //            coefficients rounded with lrintf. Byte-exact with `ffmpeg -i x.adx`.
 enum class AdxFlavor { Cri, Ffmpeg };
 
+// How the predictor history behaves when playback jumps loop_end -> loop_start.
+// A real-time player carries the running history across the jump; a player that
+// re-seeks decodes the loop body again and lands on the linear history instead.
+// Which one to emulate was decided empirically against vgmstream's looped render on
+// all 45 looping streams (docs/PROJECT.md); the game's own IOP player is not reversed
+// yet, so this is a reference-decoder choice, not a hardware claim.
+enum class AdxLoopState {
+    Carry,        // keep the history from the sample before loop_end
+    ResetHeader,  // reseed h1/h2 from header 0x18/0x1c at the jump
+    Linear,       // take the loop body straight out of the linear decode (history as if no jump)
+};
+
+struct AdxLoopRender {
+    int32_t      loops = 1;                          // extra loop-body plays after the intro
+    bool         tail  = true;                       // append loop_end..end once the loops are done
+    AdxLoopState state = AdxLoopState::Linear;  // matches vgmstream byte-exact
+};
+
+// Writes interleaved s16 to a canonical 44-byte-header WAV (RIFF/WAVE/fmt 16/data).
+bool adx_write_wav(const char* path, const int16_t* pcm, size_t samples_per_channel,
+                   uint32_t channels, uint32_t sample_rate);
+
 // Copies `size` bytes of ADX into `out` with the type-8/9 keystream removed from
 // every frame's scale word (13-bit scale kept, filter bits cleared) and the
 // version word rewritten to 0x0400, i.e. a plain ADX ffmpeg/VGAudio can decode.
@@ -114,6 +136,14 @@ public:
 
     size_t samples_per_channel() const { return samples_per_channel_; }
     size_t samples_per_channel_trimmed() const;
+
+    // Renders the playback timeline the PS2 player produces, not just the file
+    // layout: intro [0, loop_end), `loops` x [loop_start, loop_end), then the tail
+    // [loop_end, sample_count). Non-looping streams degrade to decode_trimmed().
+    // `out` receives interleaved s16. Malformed loop points fall back to a plain
+    // linear render with `err` set (still returns true); false means the stream layout
+    // itself is unusable.
+    bool render_loop(const AdxLoopRender& opt, std::vector<int16_t>* out, std::string* err);
 
 private:
     std::vector<uint8_t> data_;

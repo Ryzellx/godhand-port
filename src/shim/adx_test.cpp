@@ -33,6 +33,8 @@ using gh::audio::AdxDecoder;
 using gh::audio::AdxFlavor;
 using gh::audio::AdxHeader;
 using gh::audio::AdxKey;
+using gh::audio::AdxLoopRender;
+using gh::audio::AdxLoopState;
 
 struct Options {
     std::vector<std::string> files;
@@ -44,6 +46,10 @@ struct Options {
     uint32_t limit = 0;
     bool synth = false;
     bool skip_ffmpeg = false;
+    bool loop_render = false;      // render the loop timeline and compare to vgmstream -l N -F
+    std::string loop_state = "auto";  // carry | reset | linear | auto
+    int loops = 1;                 // extra loop-body plays (vgmstream is run with -l loops+1)
+    std::string wav_dir;           // optional: dump trimmed PCM to <dir>/<name>.wav
 };
 
 struct Compare {
@@ -214,6 +220,33 @@ bool vgmstream_pcm(const Options& o, const std::string& file, std::vector<int16_
     return true;
 }
 
+// Decodes a looping file the way vgmstream's renderer expands it: -l <loops+1>.0
+// plays one extra loop body per unit, -F suppresses the fade tail so the output is
+// exactly intro + N bodies + tail.
+bool vgmstream_loop_pcm(const Options& o, const std::string& file, int loops,
+                        std::vector<int16_t>* pcm) {
+    if (o.vgmstream.empty()) return false;
+    const std::string base = o.tmp + "/vgmloop_" + stem_of(file);
+    const std::string wav = base + ".wav";
+    const std::string raw = base + ".raw";
+    std::remove(wav.c_str());
+    std::remove(raw.c_str());
+    const std::string cmd = shell_quote(o.vgmstream) + " -l " + std::to_string(loops + 1) +
+                            ".0 -F -o " + shell_quote(wav) + " " + shell_quote(file) +
+                            " >/dev/null 2>&1";
+    if (!run_cmd(cmd)) return false;
+    if (!run_cmd(shell_quote(o.ffmpeg) + " -v error -y -i " + shell_quote(wav) +
+                 " -f s16le -acodec pcm_s16le " + shell_quote(raw) + " >/dev/null 2>&1"))
+        return false;
+    std::vector<uint8_t> bytes;
+    if (!read_file(raw, &bytes) || bytes.empty()) return false;
+    pcm->resize(bytes.size() / 2);
+    std::memcpy(pcm->data(), bytes.data(), pcm->size() * 2);
+    std::remove(wav.c_str());
+    std::remove(raw.c_str());
+    return true;
+}
+
 // Builds a synthetic encoding-type-2 ADX (per-frame filter index) so the 0..3
 // fixed-coefficient table can be validated against vgmstream.
 std::vector<uint8_t> make_synth_adx(uint32_t filter, uint32_t frames, uint32_t sample_rate) {
@@ -259,6 +292,14 @@ struct FileResult {
     bool loop_ok = true;
     size_t hdr_samples = 0;
     bool loop_seen = false;
+    bool loop_render_checked = false;
+    bool loop_render_exact = false;
+    bool loop_render_len_ok = false;
+    double loop_snr = 0.0;
+    size_t loop_samples = 0;      // ours, per channel
+    size_t loop_ref_samples = 0;  // vgmstream, per channel
+    int loop_state_mask = 0;      // bit0 carry, bit1 reset, bit2 linear matched byte-exact
+    int loop_state_used = 0;      // 0 carry, 1 reset, 2 linear
     size_t pcm_samples = 0;
     size_t trimmed_samples = 0;
 };
@@ -369,8 +410,152 @@ FileResult check_file(const Options& o, const AdxKey& key, const std::string& pa
         }
     }
 
+    if (o.loop_render && disk.loop) {
+        r.loop_render_checked = true;
+        std::printf("     loop align: start%%32=%d end%%32=%d blank=%u\n",
+                    disk.loop_start_sample % 32, disk.loop_end_sample % 32, disk.loop_padding);
+        std::vector<int16_t> ref;
+        if (!vgmstream_loop_pcm(o, path, o.loops, &ref)) {
+            std::printf("FAIL %-24s loop render: vgmstream reference failed\n", name.c_str());
+            r.loop_render_len_ok = false;
+        } else {
+            r.loop_ref_samples = ref.size() / disk.channels;
+            struct Cand { const char* name; AdxLoopState st; int bit; };
+            static const Cand kCands[3] = {{"carry", AdxLoopState::Carry, 1},
+                                           {"reset", AdxLoopState::ResetHeader, 2},
+                                           {"linear", AdxLoopState::Linear, 4}};
+            std::vector<int16_t> carry_pcm, linear_pcm;
+            const size_t loop_pt_start = (size_t)disk.loop_start_sample;
+            const size_t loop_pt_end = (size_t)disk.loop_end_sample;
+            for (const Cand& cand : kCands) {
+                if (o.loop_state != "auto" && o.loop_state != cand.name) continue;
+                AdxLoopRender lr;
+                lr.loops = o.loops;
+                lr.tail = true;
+                lr.state = cand.st;
+                std::vector<int16_t> ours;
+                std::string lerr;
+                if (!dec.render_loop(lr, &ours, &lerr)) {
+                    std::printf("FAIL %-24s loop render (%s): %s\n", name.c_str(), cand.name,
+                                lerr.empty() ? "render error" : lerr.c_str());
+                    continue;
+                }
+                if (r.loop_samples == 0) r.loop_samples = ours.size() / disk.channels;
+                if (cand.bit == 1) carry_pcm = ours;
+                if (cand.bit == 4) linear_pcm = ours;
+                const Compare cmp = compare_pcm(ours, ref);
+                const bool exact = cmp.exact && ours.size() == ref.size();
+                if (exact) r.loop_state_mask |= cand.bit;
+                if (o.loop_state == "auto") {
+                    std::printf("     loop state %-6s ours=%-9zu ref=%-9zu snr=%7.2f dB %s\n",
+                                cand.name, ours.size() / disk.channels, r.loop_ref_samples, cmp.snr_db,
+                                exact ? "EXACT" : "diff");
+                } else {
+                    r.loop_state_used = (cand.bit == 1) ? 0 : (cand.bit == 2) ? 1 : 2;
+                    r.loop_snr = cmp.snr_db;
+                    r.loop_render_len_ok = (ours.size() == ref.size());
+                    r.loop_render_exact = exact;
+                    std::printf("LOOPRENDER %-22s state=%-6s loops=%d ours=%-9zu ref=%-9zu "
+                                "snr=%.2f %s\n",
+                                name.c_str(), cand.name, o.loops, ours.size() / disk.channels,
+                                r.loop_ref_samples, cmp.snr_db, exact ? "PASS" : "FAIL");
+                    if (!exact)
+                        std::printf("     loop diff: %zu/%zu samples, len %zu vs %zu\n",
+                                    cmp.mismatches, cmp.samples, ours.size(), ref.size());
+                }
+            }
+            int carry_vs_linear_diffs = 0;
+            int carry_vs_linear_max = 0;
+            if (!carry_pcm.empty() && carry_pcm.size() == linear_pcm.size()) {
+                for (size_t i = 0; i < carry_pcm.size(); ++i) {
+                    const int d = (int)carry_pcm[i] - (int)linear_pcm[i];
+                    if (d != 0) {
+                        ++carry_vs_linear_diffs;
+                        if (std::abs(d) > carry_vs_linear_max) carry_vs_linear_max = std::abs(d);
+                    }
+                }
+            }
+            // Loop seam: how big is the step from the last sample before the jump to
+            // the first sample after it, compared with the normal step distribution in
+            // the body. A seamless authored loop shows a seam near the body median.
+            auto seam_of = [&](const std::vector<int16_t>& pcm) -> int {
+                if (pcm.empty() || loop_pt_end == 0) return -1;
+                const size_t ch = disk.channels;
+                int worst = 0;
+                for (size_t c = 0; c < ch; ++c) {
+                    const int a = (int)pcm[(loop_pt_end - 1) * ch + c];
+                    const int b = (int)pcm[loop_pt_end * ch + c];
+                    if (std::abs(b - a) > worst) worst = std::abs(b - a);
+                }
+                return worst;
+            };
+            int body_p999 = 0;
+            if (!linear_pcm.empty()) {
+                const size_t ch = disk.channels;
+                std::vector<int> deltas;
+                deltas.reserve((loop_pt_end - loop_pt_start) * ch);
+                for (size_t i = loop_pt_start * ch + 1; i < loop_pt_end * ch; ++i) {
+                    const int d = std::abs((int)linear_pcm[i] - (int)linear_pcm[i - 1]);
+                    deltas.push_back(d);
+                }
+                if (!deltas.empty()) {
+                    const size_t k = (deltas.size() * 999) / 1000;
+                    std::nth_element(deltas.begin(), deltas.begin() + (ptrdiff_t)k, deltas.end());
+                    body_p999 = deltas[k];
+                }
+            }
+            const int seam_carry = seam_of(carry_pcm);
+            const int seam_linear = seam_of(linear_pcm);
+            if (o.loop_state == "auto") {
+                r.loop_render_exact = (r.loop_state_mask != 0);
+                r.loop_snr = r.loop_render_exact ? 999.0 : 0.0;
+                std::printf("LOOPRENDER %-22s loops=%d ours=%-9zu ref=%-9zu match=%s%s%s "
+                            "carry_vs_linear_diff=%d max=%d\n",
+                            name.c_str(), o.loops, r.loop_samples, r.loop_ref_samples,
+                            (r.loop_state_mask & 1) ? "carry" : "-",
+                            (r.loop_state_mask & 2) ? ",reset" : "",
+                            (r.loop_state_mask & 4) ? ",linear" : "", carry_vs_linear_diffs,
+                            carry_vs_linear_max);
+                std::printf("     loop seam: carry=%d linear=%d body_p999=%d\n", seam_carry,
+                            seam_linear, body_p999);
+            } else if (r.loop_samples != 0 && r.loop_ref_samples != 0) {
+                r.loop_render_len_ok = (r.loop_samples == r.loop_ref_samples);
+            }
+        }
+    }
+
+    if (!o.wav_dir.empty()) {
+        const std::string wav = o.wav_dir + "/" + name + ".wav";
+        if (!gh::audio::adx_write_wav(wav.c_str(), cri.data(), cri.size() / disk.channels, disk.channels,
+                                     disk.sample_rate))
+            std::printf("     warn: cannot write %s\n", wav.c_str());
+        if (disk.loop) {
+            // The dump must carry the same state as the gate, otherwise the WAV a
+            // listener hears is not the timeline the decoder claims to produce.
+            const AdxLoopState st = o.loop_state == "carry"   ? AdxLoopState::Carry
+                                    : o.loop_state == "reset" ? AdxLoopState::ResetHeader
+                                                              : AdxLoopState::Linear;
+            AdxLoopRender lr;
+            lr.loops = o.loops;
+            lr.tail = true;
+            lr.state = st;
+            std::vector<int16_t> looped;
+            std::string lerr;
+            if (dec.render_loop(lr, &looped, &lerr)) {
+                const std::string lwav = o.wav_dir + "/" + name + ".loop-" +
+                                         (st == AdxLoopState::Carry   ? "carry"
+                                          : st == AdxLoopState::ResetHeader ? "reset"
+                                                                            : "linear") +
+                                         ".wav";
+                gh::audio::adx_write_wav(lwav.c_str(), looped.data(), looped.size() / disk.channels,
+                                         disk.channels, disk.sample_rate);
+            }
+        }
+    }
+
     r.pass = (o.skip_ffmpeg || (r.ffmpeg_exact && r.snr_ffmpeg_libav >= 60.0)) &&
-             (!r.vgm_checked || (r.vgm_exact && r.len_ok && r.loop_ok));
+             (!r.vgm_checked || (r.vgm_exact && r.len_ok && r.loop_ok)) &&
+             (!r.loop_render_checked || r.loop_render_exact);
 
     std::printf("%s %-24s sr=%-6u ch=%u frames=%-7zu hdr=%-8zu pcm=%-8zu trimmed=%-8zu loop=%-3s "
                 "snr_ff=%.2f snr_vgm=%.2f\n",
@@ -430,6 +615,10 @@ void usage() {
         "  --tmp <dir>         scratch dir for plain copies / refs (default: /dev/shm/adxtest)\n"
         "  --key <keystring>   ADX type-8 keystring (default: karaage = God Hand)\n"
         "  --synth             build encoding-type-2 vectors and validate filter 0..3\n"
+        "  --loop-render       render intro+bodies+tail and diff against vgmstream -l N -F\n"
+        "  --loop-state <s>    carry|reset|linear|auto (default auto = report which matches)\n"
+        "  --loops <n>         extra loop-body plays, default 1 (vgmstream gets -l n+1)\n"
+        "  --wav <dir>         dump trimmed PCM (and one looped pass) as 16-bit WAV\n"
         "  --no-ffmpeg         decode + vgmstream self-check only\n");
 }
 
@@ -454,6 +643,10 @@ int main(int argc, char** argv) {
         else if (a == "--key") o.key = next("--key");
         else if (a == "--synth") o.synth = true;
         else if (a == "--no-ffmpeg") o.skip_ffmpeg = true;
+        else if (a == "--loop-render") o.loop_render = true;
+        else if (a == "--loop-state") o.loop_state = next("--loop-state");
+        else if (a == "--loops") o.loops = (int)std::strtol(next("--loops").c_str(), nullptr, 10);
+        else if (a == "--wav") o.wav_dir = next("--wav");
         else if (a == "-h" || a == "--help") { usage(); return 0; }
         else if (a.size() > 2 && a[0] == '-' && a[1] == '-') {
             std::printf("error: unknown option %s\n", a.c_str());
@@ -473,7 +666,15 @@ int main(int argc, char** argv) {
         o.files.swap(picked);
     }
 
+    if (o.loop_state != "auto" && o.loop_state != "carry" && o.loop_state != "reset" &&
+        o.loop_state != "linear") {
+        std::printf("error: --loop-state must be carry|reset|linear|auto\n");
+        return 2;
+    }
+    if (o.loops < 0) o.loops = 0;
+
     run_cmd("mkdir -p " + shell_quote(o.tmp));
+    if (!o.wav_dir.empty()) run_cmd("mkdir -p " + shell_quote(o.wav_dir));
     if (o.vgmstream.empty()) {
         const char* env = std::getenv("VGMSTREAM_CLI");
         if (env && *env) o.vgmstream = env;
@@ -490,6 +691,8 @@ int main(int argc, char** argv) {
 
     size_t pass = 0, fail = 0, ffmpeg_exact = 0, vgm_checked = 0, vgm_exact = 0;
     size_t loops = 0, loop_ok_checked = 0;
+    size_t lr_checked = 0, lr_exact = 0, lr_carry = 0, lr_reset = 0, lr_linear = 0;
+    size_t lr_samples = 0;
     double snr_ff_min = 1e9, snr_vgm_min = 1e9;
     size_t total_samples = 0;
     for (const std::string& f : o.files) {
@@ -501,6 +704,14 @@ int main(int argc, char** argv) {
         if (r.snr_ffmpeg_libav < snr_ff_min) snr_ff_min = r.snr_ffmpeg_libav;
         if (r.vgm_checked && r.snr_vgm_cri < snr_vgm_min) snr_vgm_min = r.snr_vgm_cri;
         if (r.hdr_samples && r.loop_seen) { ++loops; if (r.loop_ok) ++loop_ok_checked; }
+        if (r.loop_render_checked) {
+            ++lr_checked;
+            if (r.loop_render_exact) ++lr_exact;
+            if (r.loop_state_mask & 1) ++lr_carry;
+            if (r.loop_state_mask & 2) ++lr_reset;
+            if (r.loop_state_mask & 4) ++lr_linear;
+            lr_samples += r.loop_samples;
+        }
     }
 
     int synth_fail = 0;
@@ -513,6 +724,10 @@ int main(int argc, char** argv) {
                 "loop_files=%zu loop_verified=%zu\n",
                 o.files.size(), pass, fail, ffmpeg_exact, o.files.size(), vgm_exact, vgm_checked,
                 snr_ff_min, snr_vgm_min, total_samples, loops, loop_ok_checked);
+    if (o.loop_render)
+        std::printf("SUMMARY looprender_checked=%zu looprender_exact=%zu state_carry=%zu "
+                    "state_reset=%zu state_linear=%zu loop_pcm_samples_total=%zu loops=%d\n",
+                    lr_checked, lr_exact, lr_carry, lr_reset, lr_linear, lr_samples, o.loops);
     if (o.synth) std::printf("SUMMARY synth_failures=%d\n", synth_fail);
     return (fail == 0 && synth_fail == 0) ? 0 : 1;
 }

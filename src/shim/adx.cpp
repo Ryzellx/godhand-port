@@ -176,9 +176,16 @@ Lpc coefs_ffmpeg(uint16_t cutoff, uint32_t sample_rate) {
 
 // Decodes one 18-byte frame into `out` with a stride of `channels` int16s.
 // h1/h2 carry the per-channel predictor state across frames.
+// hist_at / hist_h1 / hist_h2 let a caller capture the predictor state after
+// `hist_at` samples of this frame. Loop jumps can land mid-frame (God Hand has
+// loop_end 6.163.980 = 192624.375 frames), so the state at the jump point cannot
+// be read off the running decoder: it has to be reconstructed from the state the
+// frame started with.
 void decode_frame(const uint8_t* frame, uint8_t encoding, AdxFlavor flavor,
                   const Lpc& header_coef, int32_t* h1, int32_t* h2,
-                  int16_t* out, size_t stride) {
+                  int16_t* out, size_t stride,
+                  uint32_t hist_at = kAdxFrameSamples, int32_t* hist_h1 = nullptr,
+                  int32_t* hist_h2 = nullptr) {
     const uint16_t word = rd16(frame);
     int32_t scale;
     Lpc coef = header_coef;
@@ -212,6 +219,10 @@ void decode_frame(const uint8_t* frame, uint8_t encoding, AdxFlavor flavor,
         out[i * stride] = (int16_t)s;
         s2 = s1;
         s1 = s;
+        if (hist_h1 != nullptr && i + 1 == hist_at) {
+            *hist_h1 = s1;
+            *hist_h2 = s2;
+        }
     }
     *h1 = s1;
     *h2 = s2;
@@ -423,6 +434,157 @@ const std::vector<int16_t>& AdxDecoder::decode_trimmed() {
     pcm_trimmed_.assign(pcm_.begin(),
                         pcm_.begin() + (ptrdiff_t)(samples_per_channel_trimmed_ * header_.channels));
     return pcm_trimmed_;
+}
+
+namespace {
+
+// Predictor history for every channel, used as a per-frame snapshot.
+struct Hist {
+    int32_t h1[kAdxMaxChannels] = {};
+    int32_t h2[kAdxMaxChannels] = {};
+};
+
+}  // namespace
+
+bool AdxDecoder::render_loop(const AdxLoopRender& opt, std::vector<int16_t>* out,
+                             std::string* err) {
+    if (out == nullptr) return false;
+    const std::vector<int16_t>& linear = decode_trimmed();
+    const size_t channels = header_.channels;
+    const size_t total = samples_per_channel_trimmed();
+    out->clear();
+    if (channels == 0 || total == 0) return false;
+
+    const int64_t ls = header_.loop_start_sample;
+    const int64_t le = header_.loop_end_sample;
+    const bool loopable = header_.loop && ls >= 0 && le > ls && (uint64_t)le <= (uint64_t)total;
+
+    if (!loopable) {
+        out->assign(linear.begin(), linear.end());
+        if (header_.loop && err != nullptr) *err = "loop points outside stream; rendered linearly";
+        return true;
+    }
+
+    const size_t loop_start = (size_t)ls;
+    const size_t loop_end = (size_t)le;
+    const int32_t loops = opt.loops < 0 ? 0 : opt.loops;
+
+    auto emit = [&](const int16_t* src, size_t n) {
+        out->insert(out->end(), src, src + (ptrdiff_t)(n * channels));
+    };
+
+    if (opt.state == AdxLoopState::Linear) {
+        // The loop body is taken verbatim from the linear decode: this is what a
+        // player that re-seeks by decoding from sample 0 would emit.
+        emit(linear.data(), loop_end);
+        for (int32_t i = 0; i < loops; ++i) emit(linear.data() + loop_start * channels, loop_end - loop_start);
+        if (opt.tail && loop_end < total) emit(linear.data() + loop_end * channels, total - loop_end);
+        return true;
+    }
+
+    const size_t frame_bytes = (size_t)header_.frame_size * channels;
+    if (header_.data_offset >= data_.size() || frame_bytes == 0) return false;
+    const size_t blocks = (data_.size() - header_.data_offset) / frame_bytes;
+    const uint8_t* body = data_.data() + header_.data_offset;
+    const Lpc header_coef = (flavor_ == AdxFlavor::Cri)
+                                ? coefs_cri(header_.cutoff_hz, header_.sample_rate)
+                                : coefs_ffmpeg(header_.cutoff_hz, header_.sample_rate);
+
+    Hist run;   // predictor state after the last fully decoded frame
+    Hist entry; // state the cached frame started from
+    if (flavor_ == AdxFlavor::Cri) {
+        for (size_t c = 0; c < channels; ++c) {
+            run.h1[c] = header_.history[c][0];
+            run.h2[c] = header_.history[c][1];
+        }
+    }
+
+    const size_t kNoFrame = (size_t)-1;
+    size_t cached = kNoFrame;
+    std::vector<int16_t> frame_buf((size_t)kAdxFrameSamples * channels, 0);
+
+    // Decodes frame `idx` from the current `run` state (snapshotting the entry state
+    // so a mid-frame jump can reconstruct the predictor at the exact sample).
+    auto load_frame = [&](size_t idx) {
+        if (idx >= blocks) return false;
+        entry = run;
+        for (size_t c = 0; c < channels; ++c) {
+            decode_frame(body + idx * frame_bytes + c * header_.frame_size, header_.encoding,
+                         flavor_, header_coef, &run.h1[c], &run.h2[c],
+                         frame_buf.data() + c, channels);
+        }
+        cached = idx;
+        return true;
+    };
+
+    size_t pos = 0;
+    int32_t played = 0;
+    while (pos < total) {
+        const size_t frame = pos / kAdxFrameSamples;
+        const size_t off = pos % kAdxFrameSamples;
+        if (frame != cached && !load_frame(frame)) break;
+        const size_t seg_end = (pos < loop_end) ? loop_end : total;
+        size_t take = kAdxFrameSamples - off;
+        if (take > seg_end - pos) take = seg_end - pos;
+        emit(frame_buf.data() + off * channels, take);
+        pos += take;
+
+        if (pos == loop_end && played < loops) {
+            // State at the jump point. loop_end may sit inside a frame, so rebuild it
+            // from the state that frame started with instead of using `run`.
+            Hist at = run;
+            if (off + take < kAdxFrameSamples) {
+                at = entry;
+                for (size_t c = 0; c < channels; ++c) {
+                    int32_t hh1 = at.h1[c], hh2 = at.h2[c];
+                    decode_frame(body + frame * frame_bytes + c * header_.frame_size,
+                                 header_.encoding, flavor_, header_coef, &hh1, &hh2,
+                                 frame_buf.data() + c, channels, (uint32_t)(off + take), &at.h1[c],
+                                 &at.h2[c]);
+                }
+            }
+            run = (opt.state == AdxLoopState::ResetHeader) ? Hist{} : at;
+            if (opt.state == AdxLoopState::ResetHeader && flavor_ == AdxFlavor::Cri) {
+                for (size_t c = 0; c < channels; ++c) {
+                    run.h1[c] = header_.history[c][0];
+                    run.h2[c] = header_.history[c][1];
+                }
+            }
+            pos = loop_start;
+            ++played;
+            cached = kNoFrame;  // loop_start may live in an already cached frame
+        } else if (pos == loop_end && !opt.tail) {
+            break;
+        }
+    }
+    return true;
+}
+
+bool adx_write_wav(const char* path, const int16_t* pcm, size_t samples_per_channel,
+                   uint32_t channels, uint32_t sample_rate) {
+    if (path == nullptr || pcm == nullptr || channels == 0) return false;
+    FILE* f = std::fopen(path, "wb");
+    if (f == nullptr) return false;
+    const uint32_t data_bytes = (uint32_t)(samples_per_channel * channels * 2);
+    const uint32_t byte_rate = sample_rate * channels * 2;
+    auto w32 = [&](uint32_t v) { std::fwrite(&v, 4, 1, f); };
+    auto w16 = [&](uint16_t v) { std::fwrite(&v, 2, 1, f); };
+    std::fwrite("RIFF", 1, 4, f);
+    w32(36 + data_bytes);
+    std::fwrite("WAVEfmt ", 1, 8, f);
+    w32(16);
+    w16(1);
+    w16((uint16_t)channels);
+    w32(sample_rate);
+    w32(byte_rate);
+    w16((uint16_t)(channels * 2));
+    w16(16);
+    std::fwrite("data", 1, 4, f);
+    w32(data_bytes);
+    if (data_bytes != 0) std::fwrite(pcm, 2, samples_per_channel * channels, f);
+    const bool ok = (std::ferror(f) == 0);
+    std::fclose(f);
+    return ok;
 }
 
 bool adx_decode_file(const char* path, AdxFlavor flavor, const AdxKey& key,
