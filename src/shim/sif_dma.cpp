@@ -4,6 +4,7 @@
 #include "sif_dma.h"
 #include "sif_rpc.h"
 #include "ee_bus.h"
+#include "ee_cpu.h"
 #include "ee_kernel.h"
 
 #include <cstdio>
@@ -22,9 +23,18 @@ Stats g_st;
 u32 g_last_id = 0;
 int g_verbose = 0;
 int g_dumped = 0;
-// SifRpcServerData palsu (dipakai balasan bind) di RAM EE bebas: bss game berakhir
-// 0x7867b4, stack 0x1FFFF00 -> 0xF00000..0xF2FFFF aman.
-constexpr u32 SD_STRUCT = 0x00F00000u, SD_BUF = 0x00F10000u, SD_CBUF = 0x00F20000u, SD_SIZE = 0x10000u;
+// DUA RUANG ALAMAT BERBEDA — jangan disatukan:
+//  * SD_STRUCT adalah `cd->server`, pointer yang di-dereference GAME di RAM EE (32 MB).
+//    Game memuat ELF di vaddr 0x00100000, jadi ruang bebas EE = di atas bss 0x7867b4
+//    dan di bawah stack 0x1FFFF00 -> 0xF00000. (Regresi terukur 2026-10-24: SD_STRUCT
+//    sempat dipindah ke 0x00100000 = alamat load ELF, 16 B pertama image game tertimpa
+//    struct SifRpcServerData -> boot mati, 0 bind.)
+//  * SD_BUF/SD_CBUF adalah alamat RAM IOP (2 MB, model g_iop). Game meng-DMA payload
+//    kiriman ke cd->buf, jadi alamat ini WAJIB < 0x200000 supaya iop_write() mendarat.
+//    0xF00000 dulu di luar RAM IOP -> payload terbuang (terukur: fno=0 send=512, isi nol).
+constexpr u32 SD_STRUCT = 0x00F00000u;                                  // EE (cd->server)
+constexpr u32 SD_BUF = 0x00110000u, SD_CBUF = 0x00120000u;              // IOP (2 MB)
+constexpr u32 SD_SIZE = 0x10000u;
 std::map<u32, u32> g_cd_server;
 bool g_autostub = true;   // auto-bind stub utk sid tanpa backend      // SifRpcClientData* -> sid (dari BIND)
 u32 g_sreg[16]{};                    // SifCmdSRegData index/value (SET_SREG)
@@ -38,10 +48,30 @@ void wr(u8* p, u32 off, u32 v) {
     p[off] = (u8)v; p[off + 1] = (u8)(v >> 8); p[off + 2] = (u8)(v >> 16); p[off + 3] = (u8)(v >> 24);
 }
 
+// Riwayat tulis RAM IOP dari DMA. Dipakai memilih sumber payload RPC: satu-satunya
+// bukti sah bahwa sebuah alamat berisi payload kiriman game adalah DMA yang menulisnya.
+struct WriteRec { u32 addr, len; u64 seq; };
+WriteRec g_wr[16]{};
+int g_wr_n = 0;
+u64 g_wr_seq = 0;
+
 void iop_write(u32 addr, const u8* data, u32 n) {
     if (addr >= IOP_RAM_SIZE) return;
     if (addr + (u64)n > IOP_RAM_SIZE) n = IOP_RAM_SIZE - addr;
     std::memcpy(iop().data() + addr, data, n);
+    g_wr[g_wr_n % 16] = WriteRec{addr, n, ++g_wr_seq};
+    g_wr_n++;
+}
+
+// seq tulis terakhir yang MENUTUPI penuh [addr, addr+n); 0 = tidak ada.
+u64 wr_seq_covering(u32 addr, u32 n) {
+    if (!addr || !n) return 0;
+    u64 best = 0;
+    for (int i = 0; i < 16 && i < g_wr_n; i++) {
+        const WriteRec& w = g_wr[i];
+        if (w.seq > best && w.addr <= addr && w.addr + (u64)w.len >= addr + (u64)n) best = w.seq;
+    }
+    return best;
 }
 
 bool iop_copy_out(u32 addr, u8* out, u32 n) {
@@ -68,7 +98,11 @@ void dump_packet(const char* tag, u32 cid, const u8* p, u32 len) {
 void finish_request(u32 pkt_addr, u32 cd, u32 extra_cid, u32 sd, u32 buf, u32 cbuf) {
     u32 ee = pkt_addr & 0x1FFFFFFFu;
     u32 rec_id = eebus::read32(ee + 16);
-    eebus::write32(ee + 16, rec_id | 2u);
+    // rec_id bit0 = "request masih jalan", bit1 = "selesai". Bukti semantik dari kode
+    // game sendiri: is_busy() @0x3b3328 (dipakai wait @0x375930) kembali 1 selama
+    // (rec_id & 1) != 0, jadi completion WAJIB clear bit0 — kalau tidak, wait-loop
+    // berputar selamanya walau bit1 sudah set (terukur: 325.967.981 iterasi).
+    eebus::write32(ee + 16, (rec_id & ~1u) | 2u);
     if (extra_cid) {
         eebus::write32(ee + 32, extra_cid);
         eebus::write32(ee + 36, sd);
@@ -96,6 +130,8 @@ void reset() {
     g_dumped = 0;
     g_cd_server.clear();
     std::memset(g_sreg, 0, sizeof(g_sreg));
+    std::memset(g_wr, 0, sizeof(g_wr));
+    g_wr_n = 0; g_wr_seq = 0;
 }
 
 void set_verbose(int n) { g_verbose = n; g_dumped = 0; }
@@ -124,9 +160,27 @@ u32 kick(u32 sdd_addr, u32 count) {
         if (!e.size) continue;
         g_st.entries++;
         if (e.size > MAX_XFER) e.size = MAX_XFER;
-        if (e.src >= 0x20000000u) e.ee2iop = true;               // alias uncached EE
-        else if (e.dst >= 0x00100000u) e.ee2iop = false;         // tujuan window EE -> IOP->EE
-        else e.ee2iop = true;                                     // default EE->IOP
+        // Arah: sdd dari SifSetDma (sisi EE) umumnya EE->IOP. IOP->EE hanya kalau
+        // src jelas alamat IOP (< 2 MB) DAN dst jelas alamat EE (>= 2 MB).
+        // Heuristik lama (dst >= 1 MB -> IOP->EE) salah begitu buffer SIF kita
+        // sendiri ada di 0x110000: payload kiriman game jadi dibuang (terukur:
+        // send=512 tapi isi nol).
+        e.ee2iop = !(e.src < 0x00200000u && e.dst >= 0x00200000u);
+        if (getenv("GH_SIF_DUMP") && e.size >= 256) {
+            for (u32 k = 0; k < 4; k++)
+                std::fprintf(stderr, "[raw] kick=%llu entry%d w%d=0x%08x\n",
+                             (unsigned long long)g_st.kicks, i, k, eebus::read32(a + k * 4));
+            unsigned char eb[64];
+            if (eebus::mem_read(e.src, eb, 64)) {
+                std::fprintf(stderr, "[raw] EE@0x%08x:", e.src);
+                for (int k = 0; k < 48; k++) std::fprintf(stderr, "%02x", eb[k]);
+                std::fprintf(stderr, "\n");
+            }
+        }
+        if (getenv("GH_SIF_DUMP") && e.size >= 64)
+            std::fprintf(stderr, "[sdd] kick=%llu i=%u src=0x%08x dst=0x%08x size=%u %s\n",
+                         (unsigned long long)g_st.kicks, i, e.src, e.dst, e.size,
+                         e.ee2iop ? "EE->IOP" : "IOP->EE");
         tmp.resize(e.size);
         if (e.ee2iop) {
             if (!eebus::mem_read(e.src, tmp.data(), e.size)) { g_st.pkt_short++; continue; }
@@ -209,8 +263,9 @@ u32 kick(u32 sdd_addr, u32 count) {
             }
             finish_request(pkt_addr, cd, CID_RPC_BIND, SD_STRUCT, SD_BUF, SD_CBUF);
             g_st.bind_replies++;
-            std::fprintf(stderr, "[sifdma] BIND sid=0x%08x (%s) rpc_id=%u cd=0x%08x rec_id=0x%x -> reply\n",
-                         sid, sifrpc::server_name(sid).c_str(), rpc_id, cd, rec_id);
+            if (getenv("GH_SIF_DUMP"))
+                std::fprintf(stderr, "[sifdma] BIND sid=0x%08x (%s) rpc_id=%u cd=0x%08x rec_id=0x%x caller=0x%08x -> reply\n",
+                             sid, sifrpc::server_name(sid).c_str(), rpc_id, cd, rec_id, eecpu::g_syscall_pc);
             break;
         }
         case CID_RPC_CALL: {
@@ -225,10 +280,33 @@ u32 kick(u32 sdd_addr, u32 count) {
             g_st.last_func = fno;
             g_st.last_recvbuf = recvbuf;
             if (send_size > MAX_XFER) send_size = MAX_XFER;
+            // Send-data RPC tidak selalu menempel di packet+64: game meng-DMA
+            // payload ke cd->buf (alamat yang kita balas saat BIND). Terukur di
+            // trace: entry DMA terpisah src=EE buf -> dst=cd->buf, size=send_size.
+            u32 sendbuf = cd ? eebus::read32((cd & 0x1FFFFFFFu) + 20) : 0;
             std::vector<u8> payload;
             if (send_size) {
                 payload.resize(send_size);
-                if (!iop_copy_out(e.dst + 64, payload.data(), send_size)) payload.clear();
+                // Dua kandidat, keduanya sah di HW: payload menempel di packet+64
+                // (sceSifSendCmd) atau di cd->buf hasil DMA terpisah. Pilih yang
+                // benar-benar ditulis DMA paling akhir — bukan tebakan urutan.
+                u32 cand_cd = sendbuf, cand_pkt = e.dst + 64;
+                u64 sc = wr_seq_covering(cand_cd, send_size);
+                u64 sp = wr_seq_covering(cand_pkt, send_size);
+                u32 use = (sc || sp) ? (sc >= sp ? cand_cd : cand_pkt) : cand_pkt;
+                const char* src_used = (use == cand_cd) ? "cd->buf(dma)" : "pkt+64(dma)";
+                if (!iop_copy_out(use, payload.data(), send_size)) {
+                    src_used = "pkt+64(raw)";
+                    if (!iop_copy_out(cand_pkt, payload.data(), send_size)) payload.clear();
+                }
+                if (getenv("GH_SIF_DUMP") && send_size <= 64) {
+                    std::fprintf(stderr, "[call] sid=0x%08x fno=%u payload(%zu):", sid, fno, payload.size());
+                    for (size_t k = 0; k < payload.size() && k < 64; k++) std::fprintf(stderr, " %02x", payload[k]);
+                    std::fprintf(stderr, "\n");
+                }
+                if (getenv("GH_SIF_DUMP"))
+                    std::fprintf(stderr, "[call] payload dari %s (cd->buf=0x%08x seq=%llu, pkt+64=0x%08x seq=%llu) n=%zu\n",
+                                 src_used, sendbuf, (unsigned long long)sc, cand_pkt, (unsigned long long)sp, payload.size());
             }
             g_st.payload_bytes += payload.size();
             std::vector<u8> reply;
@@ -240,6 +318,23 @@ u32 kick(u32 sdd_addr, u32 count) {
                 reply.clear();
             }
             g_st.last_result = (u32)result;
+            // Diagnosa loadfile: payload = struct {u32 size; char name[252]; ...}
+            if (getenv("GH_SIF_DUMP") && send_size >= 256 && !payload.empty()) {
+                static int dc = 0;
+                char fn[64]; std::snprintf(fn, sizeof fn, "/tmp/sif_pkt_%d.bin", dc++);
+                FILE* f = std::fopen(fn, "wb");
+                if (f) { std::fwrite(iop().data() + e.dst, 1, 64 + send_size, f); std::fclose(f); }
+            }
+            if (sid == 0x80000006u && !payload.empty()) {
+                char nm[64] = {0};
+                size_t k = 0;
+                for (size_t o = 8; o < payload.size() && k < 63 && payload[o]; o++) nm[k++] = (char)payload[o];
+                std::fprintf(stderr, "[loadfile] fno=%u size=%zu name@+8=\"%s\" words:", fno, payload.size(), nm);
+                for (size_t w = 0; w + 4 <= payload.size() && w < 40; w += 4)
+                    std::fprintf(stderr, " %08x", (unsigned)(payload[w] | (payload[w+1] << 8) |
+                                 (payload[w+2] << 16) | ((unsigned)payload[w+3] << 24)));
+                std::fprintf(stderr, "\n");
+            }
             if (recvbuf && !reply.empty()) {
                 u32 n = (u32)reply.size();
                 if (recv_size && n > recv_size) n = recv_size;
@@ -248,8 +343,9 @@ u32 kick(u32 sdd_addr, u32 count) {
             }
             finish_request(pkt_addr, cd, 0, 0, 0, 0);
             g_st.call_replies++;
-            std::fprintf(stderr, "[sifdma] CALL sid=0x%08x fno=%u send=%u recv_cap=%u -> result=%d reply=%zu\n",
-                         sid, fno, send_size, recv_size, result, reply.size());
+            if (getenv("GH_SIF_DUMP"))
+                std::fprintf(stderr, "[sifdma] CALL sid=0x%08x fno=%u send=%u recv_cap=%u -> result=%d reply=%zu\n",
+                             sid, fno, send_size, recv_size, result, reply.size());
             break;
         }
         case CID_RPC_END: g_st.cid_end++; break;

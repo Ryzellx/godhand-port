@@ -78,6 +78,7 @@ struct Cpu {
 // handler dipanggil tiap syscall. return true = berhenti (lihat cpu.fault / instret).
 // Phase 7b.9: census busy-delay loop yang di-fast-forward (idiom
 // addiu rt,rt,-1 / 4x nop / bne rt,rs,self). Semantik tetap eksak.
+inline u32 g_syscall_pc = 0;   // pc instruksi SYSCALL terakhir (diagnosa provenance)
 extern u64 g_delay_loops;
 extern u64 g_delay_inst;
 

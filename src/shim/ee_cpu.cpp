@@ -89,8 +89,12 @@ static void do_lwl(Cpu& c, u32 rt, u32 addr) {
     c.r[rt][0] = (w << sh) | (c.r[rt][0] & (sh ? ((1u << sh) - 1) : 0));
 }
 static void do_lwr(Cpu& c, u32 rt, u32 addr) {
-    u32 b = addr & 3, w = eebus::read32(addr & ~3u), sh = 8 * (3 - b);
-    u32 keep = sh ? (0xFFFFFFFFu >> sh) : 0;
+    // LWR (LE): muat byte [addr..akhir word] ke bagian BAWAH rt.
+    // b=0 -> seluruh word; b=1 -> (rt & 0xFF000000) | (w>>8); ... b=3 -> (rt & 0xFFFFFF00) | (w>>24).
+    // Bug lama: keep/shisft terbalik -> lwl 3(x) + lwr 0(x) menghasilkan 0x00000033
+    // (terukur di crt0: copy@0x781ba8=0x00000033 padahal sumber 0x30303133).
+    u32 b = addr & 3, w = eebus::read32(addr & ~3u), sh = 8 * b;
+    u32 keep = b ? (0xFFFFFFFFu << (8 * (4 - b))) : 0;
     c.r[rt][0] = (w >> sh) | (c.r[rt][0] & keep);
 }
 static void do_swl(u32 addr, u32 val) {
@@ -246,6 +250,7 @@ bool run(Cpu& c, SyscallFn handler, u64 max_inst) {
             case 0x0B: if (c.r[rt(inst)][0] != 0) w32(c, rd(inst), c.r[rs(inst)][0]); break; // movn
             case 0x0C: {  // SYSCALL — nomor di reg v1 (konvensi EE, terverifikasi)
                 u32 num = c.r[3][0];
+                g_syscall_pc = c.pc;
                 u32 v0 = 0;
                 bool known = handler(num, c.r[4][0], c.r[5][0], c.r[6][0], c.r[7][0], v0);
                 if (!known) {

@@ -106,6 +106,15 @@ u32 mmio_read32(u32 addr) {
     // (deterministik, pola sama spt VIF_STAT0 di atas). 2026-10-19.
     case 0x1000F130:
         return 0u;  // GIF_STAT: selalu ready
+    // 0x1000F000 — register SIF DMA sisi EE (dipakai lib SIF game @0x3b0140,
+    // 0x3b01e0, 0x3b0234: tulis 4 -> sync -> poll ANDI 0x4 sampai set, dengan
+    // jalur abort kalau word status di stack != 0). Pola clear-then-wait:
+    // bit2 = "transfer SIF selesai". Model: DMA kita sinkron, jadi bit2 = 1
+    // (transfer dianggap langsung selesai). Tulis 4 = clear flag -> langsung
+    // ter-set lagi pada pembacaan berikutnya.
+    case 0x1000F000:
+        g_stats.mmio_other++;
+        return 0x4u;
     default:
         g_stats.mmio_other++;
         return 0;

@@ -362,6 +362,38 @@ int main(int argc, char** argv) {
                     memcard::root().c_str());
     }
 
+    // Phase 8 diagnosa: isi buffer RPC loadfile (ground truth fno255 = "3100")
+    {
+        u32 rb = eebus::read32(0x00781980u), cp = eebus::read32(0x00781ba8u);
+        char rbs[5] = { (char)(rb & 0xff), (char)((rb >> 8) & 0xff),
+                        (char)((rb >> 16) & 0xff), (char)((rb >> 24) & 0xff), 0 };
+        std::printf("loadfile: other_fno=%llu recvbuf@0x781980=0x%08x \"%s\" copy@0x781ba8=0x%08x\n",
+                    (unsigned long long)sifrpc::loadfile_other_calls(), rb, rbs, cp);
+        std::printf("loadfile: load=%llu fail=%llu modul=[%s]\n",
+                    (unsigned long long)sifrpc::loadfile_load_count(),
+                    (unsigned long long)sifrpc::loadfile_load_fail_count(),
+                    sifrpc::loadfile_modules_csv());
+    }
+
+    // Diagnosa spin 0x375930: objek async game di 0x76A95C (lihat 0x3b2f48/0x3b3328)
+    if (std::getenv("GH_SIF_DUMP")) {
+        for (u32 base : { 0x0076A95Cu, 0x0076A980u }) {
+            std::printf("mem 0x%08x:", base);
+            for (int i = 0; i < 12; i++) std::printf(" %08x", eebus::read32(base + i * 4));
+            std::printf("\n");
+        }
+        u32 p = eebus::read32(0x0076A95Cu);
+        std::printf("ctx[0]=0x%08x ->", p);
+        if (p && p < 0x02000000u) for (int i = 0; i < 12; i++) std::printf(" %08x", eebus::read32(p + i * 4));
+        std::printf("\n");
+        std::printf("check is_done: pkt@alias[24]=0x%08x (ctx[4]=0x%08x) pkt@alias[16]=0x%08x -> bit0=%u\n",
+                    eebus::read32(0x2077EA80u + 24), eebus::read32(0x0076A95Cu + 4),
+                    eebus::read32(0x2077EA80u + 16), eebus::read32(0x2077EA80u + 16) & 1u);
+        std::printf("pkt raw 0x77EA80:");
+        for (int i = 0; i < 12; i++) std::printf(" %08x", eebus::read32(0x0077EA80u + i * 4));
+        std::printf("\n");
+    }
+
     // bukti minimal: SetupThread (60) DAN SetupHeap (61) kena, berurutan
     if (g_nsys < 2 || g_syscalls_seen[0] != 60 || g_syscalls_seen[1] != 61) {
         std::printf("FAIL: urutan syscall crt0 tidak sesuai\n"); fail = 1;

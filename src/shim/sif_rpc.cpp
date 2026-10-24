@@ -6,6 +6,7 @@
 #include <cstring>
 #include <map>
 #include <cstdio>
+#include <filesystem>
 #include <cstdlib>
 
 namespace sifrpc {
@@ -234,12 +235,196 @@ static s32 cdvd_handler(u32 func, const std::vector<u8>&, std::vector<u8>& reply
     return 0;
 }
 
+// ---------------------------------------------------------------- loadfile
+// Ground truth: IOPRP310.IMG, modul ROMDIR "LOADFILE" (ELF #12). Tabel jump fno 0..10
+// di .data 0x1ca8 (0x150 0x240 0x3d0 0x360 0x1fc 0x2f8 0x434 0x4ac 0x4f0 0x520 0x54c),
+// dan .data 0x1c9c = ASCII "3100" — nilai yang dikembalikan fno 255 (versi
+// PsIIloadfile3100). Dispatch asli: fno>=11 & fno!=255 -> return 0 tanpa tulis reply.
+static u64 g_lf_other = 0;
+static u64 g_lf_load = 0, g_lf_load_fail = 0;
+static std::vector<std::string> g_lf_mods;   // "nama ukuran"
+
+// fno 0 = LoadModule: payload = {u32 size; u32 pad; char name[252]; ...}
+// (layout dari dispatch LOADFILE IOPRF 0x150: name = req+8, param = req+0x104).
+// Native: file dibuka dari extract/modules/irx (cdrom0:\MODULES\*.IRX), ukuran
+// dibaca nyata; modul dicatat sebagai "dimuat". IOP asli memanggil modload —
+// link/relokasi tetap di sisi IOP yang tidak kita emulasi.
+static s32 loadfile_handler(u32 func, const std::vector<u8>& req, std::vector<u8>& reply) {
+    if (func == 255) {           // versi modul: 4 byte "3100" (0x30303133)
+        put32(reply, 0x30303133u);
+        return 0;
+    }
+    if (func == 0) {
+        std::string ps2name;
+        for (size_t i = 8; i < req.size() && req[i]; i++) {
+            if (ps2name.size() >= 252) break;
+            ps2name.push_back((char)req[i]);
+        }
+        std::string path;
+        u32 fsize = 0;
+        // ISO retail menyimpan modul di dalam MODULES\IRX.IMS; hasil ekstraksi ada di
+        // <root>/modules/irx/<nama>.IRX. resolve() dulu, lalu fallback ke folder itu.
+        bool resolved = !ps2name.empty() && hostio::resolve(ps2name, path);
+        if (!resolved && !ps2name.empty()) {
+            std::string base = ps2name;
+            auto sl = base.find_last_of("\\/:");
+            if (sl != std::string::npos) base = base.substr(sl + 1);
+            auto sc = base.find(';');
+            if (sc != std::string::npos) base = base.substr(0, sc);
+            for (auto& ch : base) ch = (char)std::tolower((unsigned char)ch);
+            std::string dir = hostio::root() + "/modules/irx";
+            std::error_code ec;
+            for (auto& e : std::filesystem::directory_iterator(dir, ec)) {
+                std::string fn = e.path().filename().string();
+                std::string lfn = fn;
+                for (auto& ch : lfn) ch = (char)std::tolower((unsigned char)ch);
+                if (lfn == base) { path = e.path().string(); resolved = true; break; }  // SDRDRV.IRX vs sdrdrv
+            }
+        }
+        if (resolved) {
+            std::FILE* f = std::fopen(path.c_str(), "rb");
+            if (f) { std::fseek(f, 0, SEEK_END); long n = std::ftell(f); std::fclose(f);
+                     if (n > 0) fsize = (u32)n; }
+        }
+        if (fsize) {
+            g_lf_load++;
+            auto sl = path.find_last_of('/');
+            g_lf_mods.push_back((sl == std::string::npos ? path : path.substr(sl + 1)) +
+                                " " + std::to_string(fsize) + "B");
+            std::fprintf(stderr, "[loadfile] LOAD ok \"%s\" -> %s (%u B)\n",
+                         ps2name.c_str(), path.c_str(), fsize);
+            put32(reply, 0);          // id modul 0 = sukses (model; bukan id karangan)
+            return 0;
+        }
+        g_lf_load_fail++;
+        std::fprintf(stderr, "[loadfile] LOAD GAGAL \"%s\" (resolve=%s)\n",
+                     ps2name.c_str(), path.c_str());
+        put32(reply, (u32)-1);
+        return -1;
+    }
+    g_lf_other++;
+    put32(reply, 0);
+    return 0;
+}
+u64 loadfile_other_calls() { return g_lf_other; }
+u64 loadfile_load_count() { return g_lf_load; }
+u64 loadfile_load_fail_count() { return g_lf_load_fail; }
+const char* loadfile_modules_csv() {
+    static std::string s;
+    s.clear();
+    for (size_t i = 0; i < g_lf_mods.size(); i++) { if (i) s += ", "; s += g_lf_mods[i]; }
+    return s.c_str();
+}
+
+// ---------------------------------------------------------------- iopheap
+// SID 0x80000003 — manajer heap RAM IOP. Verifikasi dari kode game sendiri (bukan
+// tebakan): 0x3b5968 = sceSifAllocIopHeap -> call(cd@0x7817c0, fno=1, send u32 size,
+// recv u32 addr); 0x3b59d8 = sceSifFreeIopHeap -> fno=2, send u32 addr, recv u32 status.
+// Tanpa backend ini autostub mengembalikan 0 = "gagal alokasi" dan game masuk jalur
+// fatal: log @0x455dc8 lalu spin mati di 0x33b2b0 (terukur 279.485.177 iterasi).
+//
+// Alokator: bump + free-list di ruang alamat RAM IOP 2 MB. Heap mulai 0x130000 —
+// di atas buffer SIF model (SD_BUF 0x110000, SD_CBUF 0x120000) dan di bawah 0x200000.
+namespace {
+constexpr u32 IOP_HEAP_BASE = 0x00130000u, IOP_HEAP_END = 0x00200000u, IOP_HEAP_ALIGN = 64u;
+u32 g_hp = IOP_HEAP_BASE;
+std::map<u32, u32> g_hp_live;             // addr -> size
+std::multimap<u32, u32> g_hp_free;        // size -> addr (first-fit)
+u64 g_hp_calls = 0, g_hp_fails = 0;
+
+u32 iopheap_alloc(u32 size) {
+    if (!size) return 0;
+    u32 n = (size + IOP_HEAP_ALIGN - 1) & ~(IOP_HEAP_ALIGN - 1);
+    for (auto it = g_hp_free.lower_bound(n); it != g_hp_free.end(); ++it) {
+        u32 addr = it->second, blk = it->first;
+        g_hp_free.erase(it);
+        if (blk > n) g_hp_free.emplace(blk - n, addr + n);
+        g_hp_live[addr] = n;
+        return addr;
+    }
+    if (g_hp + n > IOP_HEAP_END) { g_hp_fails++; return 0; }
+    u32 addr = g_hp; g_hp += n;
+    g_hp_live[addr] = n;
+    return addr;
+}
+
+s32 iopheap_handler(u32 func, const std::vector<u8>& req, std::vector<u8>& reply) {
+    u32 a0 = req.size() >= 4 ? (u32)req[0] | ((u32)req[1] << 8) | ((u32)req[2] << 16) | ((u32)req[3] << 24) : 0;
+    g_hp_calls++;
+    if (func == 1) {                       // AllocIopHeap(size) -> addr (0 = gagal)
+        u32 addr = iopheap_alloc(a0);
+        std::fprintf(stderr, "[iopheap] alloc %u -> 0x%08x\n", a0, addr);
+        put32(reply, addr);
+        return addr ? 0 : -1;
+    }
+    if (func == 2) {                       // FreeIopHeap(addr) -> status
+        auto it = g_hp_live.find(a0);
+        if (it != g_hp_live.end()) { g_hp_free.emplace(it->second, a0); g_hp_live.erase(it);
+                                     std::fprintf(stderr, "[iopheap] free 0x%08x\n", a0); }
+        put32(reply, 0);
+        return 0;
+    }
+    put32(reply, 0);
+    return 0;
+}
+u64 iopheap_calls() { return g_hp_calls; }
+u64 iopheap_fails() { return g_hp_fails; }
+} // namespace
+
+// ---------------------------------------------------------------- sjx (CRI/SJX)
+// SID 0x90000200 — server sound middleware di sisi IOP. Identifikasi dari kode game:
+// string "E0100301: SJX_Init can't allocate IOP Heap" dan "E0100302: SJX_Init can't
+// create DTX" ada di .rodata 0x455dc8/0x455df8, dipakai SJX_Init @0x33b218.
+// Urutan yang terukur: alloc IOP heap 2256 B (0x3b5968, SID 0x80000003 fno 1) lalu
+// create DTX (fno 2) dengan payload 16 B:
+//   +0  u32 0
+//   +4  u32 workbuf EE (0x003e9080)
+//   +8  u32 iop buffer (0x00130040 = heap+64 — server membuat objek di dalam buffer ini)
+//   +12 u32 ukuran (2176)
+// Reply = 4 B handle. Tanpa backend (autostub 0) game masuk jalur fatal 0x33b308
+// (log + spin). MODEL: handle = alamat buffer IOP yang dikirim game (server-side object
+// memang hidup di buffer itu); pemakaian handle berikutnya masih lewat RPC ke server ini.
+static std::map<u32, u32> g_sjx_obj;     // handle -> ukuran objek
+static u64 g_sjx_create = 0, g_sjx_ops = 0;
+
+// Protokol suara game (terpetakan dari 0x332670): fno RPC = 0x400 | opcode, payload =
+// array u32 argumen (jumlah = send_size/4), reply = array u32 (jumlah = recv_size/4).
+// Opcode 0x22 = SJUNI_CreateRmt (dipanggil 0x33aed0), 0x23 = delete/pasangan.
+s32 sjx_handler(u32 func, const std::vector<u8>& req, std::vector<u8>& reply) {
+    u32 op = (func >= 0x400u) ? (func & 0xFFu) : func;
+    std::vector<u32> a;
+    for (size_t i = 0; i + 4 <= req.size(); i += 4)
+        a.push_back((u32)req[i] | ((u32)req[i + 1] << 8) | ((u32)req[i + 2] << 16) | ((u32)req[i + 3] << 24));
+    g_sjx_ops++;
+    if (getenv("GH_SIF_DUMP")) {
+        std::fprintf(stderr, "[sjx] op=0x%02x argc=%zu:", op, a.size());
+        for (size_t i = 0; i < a.size() && i < 12; i++) std::fprintf(stderr, " %08x", a[i]);
+        std::fprintf(stderr, "\n");
+    }
+    if (op == 0x02 || op == 0x22) {         // 0x02 = create DTX, 0x22 = SJUNI_CreateRmt
+        // op 0x02: args={0, workbufEE, iopbuf, size} -> iopbuf = a[2]
+        // op 0x22: args={tipe, iopbuf, size}          -> iopbuf = a[1]
+        u32 buf = (op == 0x02) ? (a.size() > 2 ? a[2] : 0) : (a.size() > 1 ? a[1] : 0);
+        u32 h = buf ? buf : 0x00130000u;
+        g_sjx_obj[h] = 1; g_sjx_create++;
+        std::fprintf(stderr, "[sjx] op=0x%02x -> handle 0x%08x\n", op, h);
+        put32(reply, h);
+        return 0;
+    }
+    put32(reply, 0);
+    return 0;
+}
+u64 sjx_create_count() { return g_sjx_create; }
+
 void install_defaults() {
     memcard::init();
     bind(SRV_FILEIO, "fileio", fileio_handler);
     bind(SRV_CDVD, "cdvd", cdvd_handler);
     bind(SRV_MCSERV, "mcserv", mcserv_handler);
     bind(SRV_PAD, "pad", pad_handler);
+    bind(SRV_LOADFILE, "loadfile", loadfile_handler);
+    bind(SRV_IOPHEAP, "iopheap", iopheap_handler);
+    bind(SRV_SJX, "sjx", sjx_handler);
 }
 
 } // namespace sifrpc

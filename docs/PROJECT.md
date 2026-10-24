@@ -79,10 +79,16 @@ Metode: static decompilation + reimplementation layer (jalur OpenGOAL-style).
       paket sifcmd (init/reset/set-sreg/bind/call) di-decode, backend dipanggil, reply "rend"
       ditulis balik ke bus EE, `cd->server/buf/cbuf` diisi (model `_request_end`), sema klien
       di-signal, flag 0x77E6C0 bit0 di-set.
-      Bukti: `sif_test` 31/31 PASS 5×; `sif_dma_test` 10/10 PASS 5×; `adx_test` bit-exact vs ffmpeg
-      (mono 17.664 sampel, stereo 28.800, ADX asli dari ISO 707.968 sampel — maxdiff 0);
-      `crt0_test` 2 B inst: kicks=12 entries=14 bind=4 call=3 sema=7 reply=12 B, deterministik
-      (md5 stdout 644fa8b7…), 3 B inst clean-cap.
+      Bukti: `sif_test` 36/36 PASS 5× (31 test lama + 5 test Phase 8 lanjutan: loadfile versi,
+      loadfile LoadModule, iopheap alloc/free/reuse, sjx DTX); `sif_dma_test` 10/10 PASS 5×;
+      `adx_test` bit-exact vs ffmpeg
+      (mono 17.664 sampel, stereo 28.800, ADX asli dari ISO 707.968 sampel — maxdiff 0).
+      **Lanjutan 2026-10-24 (lihat LOG #15):** boots jauh lebih dalam —
+      `crt0_test 400M`: kicks=33 entries=51 ee2iop=5.808 B, sifcmd init=4 reset=1 bind=8 call=20
+      sema=25, loadfile memuat **7 modul IOP nyata** dari extract/modules/irx (sio2man 5.248 ·
+      padman 45.952 · libsd 30.144 · SDRDRV 9.216 · sdhd 14.720 · snddrv 20.352 ·
+      cri_adxi 76.928 B), iopheap alloc 2.256 B → 0x00130000 lalu 332.864 B → 0x00130900,
+      deterministik 5/5 identik.
 - [ ] **PLAYABLE** 🎮 (stage st0 load + input + render loop)
 - [ ] **PLAYABLE** 🎮 (stage st0 load + input + render loop)
 
@@ -257,3 +263,95 @@ crt0_test 2 B inst deterministik (md5 644fa8b7…).
 di-push ke `origin/main` (github.com/Ryzellx/godhand-port). Ledger ini dimirror ke
 `docs/PROJECT.md` + `docs/ENGINE-MAP.md` di repo supaya selamat kalau VPS di-rebuild.
 Verifikasi push: `git ls-tree -r HEAD` tidak memuat ISO/7z/token (163 file, .git 6,0 MB).
+
+### LOG 2026-10-24 #15 (Phase 8 tuntas: SIF DMA benar, loadfile/iopheap/SJX, memcard)
+
+Sesi ini memperbaiki jalur SIF sampai boot game masuk **inisialisasi sound middleware**,
+bukan lagi macet di bind-retry. Semua angka dari run nyata, 5× identik.
+
+**1) Tiga bug model SIF yang ditemukan lewat pengukuran**
+
+- **`cd->server` (SifRpcServerData) harus di RAM EE, `cd->buf/cbuf` di RAM IOP.** Sesi lalu
+  memindahkan ketiganya ke 0x00100000/0x00110000/0x00120000 "supaya masuk 2 MB IOP" — benar
+  untuk buf/cbuf, **salah untuk server**: 0x00100000 adalah alamat load ELF game (program header
+  vaddr 0x00100000, filesz 0x360ce4), jadi 16 B pertama image tertimpa struct. Sekarang
+  SD_STRUCT = 0x00F00000 (EE, di atas bss 0x7867b4, di bawah stack 0x1FFFF00),
+  SD_BUF = 0x00110000, SD_CBUF = 0x00120000 (IOP 2 MB).
+- **Sumber payload CALL ditentukan riwayat tulis DMA, bukan tebakan urutan.** Versi setengah
+  jadi selalu membaca `cd->buf`; di `sif_dma_test` (payload menempel di packet+64 lewat entri
+  sdd kedua, dst=64) hasilnya 8/10 (read gagal, `got=0`). Sekarang `iop_write()` mencatat
+  (addr,len,seq) 16 entri terakhir dan `wr_seq_covering(addr,n)` memilih kandidat yang benar-benar
+  ditulis DMA paling akhir; fallback pkt+64 mentah. **sif_dma_test kembali 10/10 ×5.**
+- **rec_id bit0 = "masih jalan", bit1 = "selesai".** Bukti semantik dari kode game sendiri:
+  `is_busy()` @0x3b3328 (dipakai wait @0x375930) mengembalikan 1 selama `pkt[16] & 1`.
+  `finish_request` dulu hanya `|= 2` → spin **325.967.981** iterasi di 0x375918.
+  Sekarang `(rec_id & ~1) | 2` → game lanjut.
+
+**2) Backend baru yang membuat boot bergerak (bukan stub)**
+
+- **loadfile SID 0x80000006** (`sif_rpc.cpp`): fno 255 → word versi "3100" (0x30303133,
+  terbukti masuk buffer game @0x781ba8); fno 0 = LoadModule — nama `cdrom0:\MODULES\*.IRX;1`
+  di-resolve ke `extract/modules/irx/`, ukuran dibaca nyata dari disk, dicatat loaded.
+  Hasil: 7 modul, **fail=0**.
+- **iopheap SID 0x80000003**: alloc/free heap RAM IOP (bump + free-list, base 0x00130000,
+  64 B align). Terpetakan dari kode game: 0x3b5968 = sceSifAllocIopHeap (fno 1, kirim u32 size,
+  terima u32 addr), 0x3b59d8 = sceSifFreeIopHeap (fno 2). Tanpa ini autostub balas 0 → game
+  mencetak "E0100301: SJX_Init can't allocate IOP Heap" (string .rodata 0x455dc8) lalu spin mati
+  di 0x33b2b0 (279.485.177 iterasi terukur).
+- **SJX/CRI SID 0x90000200** (MODEL, bukan implementasi middleware): protokol suara game
+  `fno = 0x400 | opcode` (terpetakan dari 0x332670). op 0x02 = create DTX (args {0, workbuf EE,
+  iopbuf, size} → handle = iopbuf), op 0x22 = SJUNI_CreateRmt (args {tipe, iopbuf, size} →
+  handle = iopbuf). Tanpa ini: "E0100302: SJX_Init can't create DTX" / "E0110102 ... can't
+  creat SJUNI_CreaetRmt". Handle = alamat buffer yang game sendiri kirim, jadi objek tetap hidup
+  di ruang IOP yang game alokasikan — bukan angka karangan.
+- **MMIO 0x1000F000** (SIF DMA status EE) balas 0x4 (bit2 "transfer selesai"); kode game
+  0x3b0210 memang poll `andi v0,4`. **LWR** diperbaiki (b=0 seluruh word; sebelumnya
+  `lwl 3(x)+lwr 0(x)` menghasilkan 0x00000033 bukan 0x30303133).
+
+**3) Status boot nyata (crt0_test, ELF retail)**
+
+`400M inst`: stop=clean-cap, pc=0x00337180, kicks=33 entries=51 ee2iop=51 (5.808 B),
+sifcmd init=4 reset=1 sreg=0 bind=8 call=20, rpc bind_replies=8 call_replies=20 sema_signals=25
+unknown_srv=3 autostub=3 handler_fail=1 payload=3.840 B reply=76 B,
+loadfile load=7 fail=0, iopheap alloc 2.256 B → 0x00130000 + 332.864 B → 0x00130900.
+Deterministik **5/5 run identik** (baris stats sama byte-per-byte).
+
+**4) Wall berikutnya (jujur, BELUM selesai)**
+
+pc 0x00337180 = jalur fatal `ps2rna_init_psj` (string 0x455548
+"E0110104: ps2rna_init_psj: can't creat SJUNI_Creaet"). Rantainya:
+0x337158 `SJUNI_Create` (0x33a190) → slot alloc 0x33a1e8 (tabel 64 entri @0x3e7ff0) →
+0x338a10 → 0x340ae8, mengembalikan 0 **tanpa RPC op baru** — jadi kegagalannya lokal di model
+suara EE (state PS2RNA/SJUNI), bukan di SIF. Untuk lanjut perlu model objek SJUNI/PS2RNA nyata
+(paling sedikit: slot voice, state machine create/attach, buffer IOP yang dipakai DMA), bukan
+stub. Ini pekerjaan Phase 9, bukan Phase 8.
+
+**5) Test floor** (semua PASS, 5× berturut, 2026-10-24): gif_test (6/6) · shim_test (ALL PASS) ·
+bus_test (ALL PASS) · sif_test 36/36 (naik dari 31: +5 test backend baru) · sif_dma_test 10/10 · crt0_test 400M (deterministik 5/5) ·
+adx_test 3 varian (2ch/48 kHz dari ISO: 96.224 sampel/ch, 2,005 s) · godhand_slice
+`setarch -R` rc=0.
+
+**6) Repo**: commit menyusul di sesi ini (lihat `git log`), mirror ledger ke `docs/`.
+
+## PROTOTYPE INTEL — God Hand Preview (Jun 20, 2006)
+Sumber: hiddenpalace.org, arsip 421.407.373 B (7z) berisi bin 1.261.928.448 B (MODE1/2048).
+ELF: `SLPM_665.50` (JP preview), 3.450.144 B, md5 `b203e5aec76b009a1f4d594f869ca157`.
+Ekstraksi tanpa menulis ISO: `7z x -so ... | tools/stream_iso_extract.py` (streaming ISO9660;
+tervalidasi dulu di retail → md5 1db3b1ea... cocok).
+
+Fakta berguna:
+- Boot langsung ke debug menu saat New Game; menu debug bisa dipanggil kapan saja (L2+R3).
+- Retail `SLUS_215.03` **tidak** punya label menu (`ROOM JUMP`, `FLAG EDIT`, dst = 0 hit),
+  tapi **masih menyimpan** string path `etc/debugres/RoomJmpTbl.dat` dan FST retail memuat
+  record `debugres/roomjmptbl.dat` → data room-jump ikut terkirim di versi final.
+- Proto punya 73 string debug, termasuk **51 flag `DBG_*` unik** di .rodata, slot nama 24 byte:
+  DBG_FPS_CAMERA_ON, DBG_PL_NO_DEATH, DBG_EM_SET_OFF, DBG_AREA_CAM, DBG_LOW_RESOLUTION,
+  DBG_SHOOTING_MODE, DBG_MENU, DBG_TIMER_DISP, dll.
+- Belum: ID numerik tiap flag (tabel nama inline di .rodata, bukan pointer table) → perlu
+  xref dari kode menu Flag Edit.
+
+Rencana pakai proto:
+1. Target render Phase 7c yang lebih murah: menu debug = mayoritas 2D/text packet, tak butuh VU1.
+2. Anchor reversing: string + struktur menu → temukan tabel flag → kalau ID sama di retail,
+   FPS camera/no-death bisa diaktifkan buat tes tanpa cheat engine.
+3. Diff dua ELF (US retail vs JP preview) buat prioritas fungsi engine vs konten.

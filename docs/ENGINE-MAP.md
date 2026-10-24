@@ -62,3 +62,18 @@ Sumber: ELF verified + 6146 fungsi decompiled + disasm 714K baris + syscall inve
   - Field micro: bit25 tf, bit24 ts, ft=bits23-19, fs=bits18-14, fd=bits13-9, func=bits8-0
   - Register: VF0..VF31 (xyzw float), VI0..VI31 (int, VI0=0), accumulator ACC (x,y,z,w)
 - Census statik .text (2,832,160 B @ 0x100000): SQC2 6.863 · LQC2 4.889 · COP2 3.054 situs
+
+## 7. Peta SID SIF — terukur dari boot retail (2026-10-24)
+| SID | Server | Bukti |
+|---|---|---|
+| 0x80000001 | fileio | bind game cd=0x7816c0; fno 255 dijawab -1 (versi fileio belum diimplementasi) |
+| 0x80000003 | iopheap (sceSifAllocIopHeap/Free) | wrapper 0x3b5968 (fno 1) & 0x3b59d8 (fno 2) |
+| 0x80000006 | loadfile (IOPRP ROMDIR idx 12) | fno 255 = word "3100"; fno 0 = LoadModule, 7 modul nyata |
+| 0x80000701 | belum dikenal (autostub) | bind setelah cri_adxi dimuat |
+| 0x80000592 | libsd (audio) | bind awal CRT, 2× |
+| 0x90000200 | SJX/CRI sound (PS2RNA) | fno = 0x400\|opcode; op 0x02 DTX, 0x22 SJUNI_CreateRmt |
+| 0x19720317 | tag internal game (bukan SID IOP) | immediate di 0x375874, dipakai objek async 0x3b2f48 |
+
+Catatan model: `cd` (SifRpcClientData) game = {+0 pkt_addr, +4 rpc_id, +8 sema_id, +20 buf,
++24 cbuf, +36 server}. `rec_id` bit0 = request aktif, bit1 = selesai (dibuktikan `is_busy()`
+@0x3b3328). Paket `sifcmd` EE→IOP didecode dari salinan RAM IOP (dua-pass kick).

@@ -31,6 +31,8 @@ static std::vector<u8> str_req(const std::string& s, u32 extra = 0) {
     v.insert(v.end(), e.begin(), e.end());
     return v;
 }
+static std::string hex32(u32 v) { char b[16]; std::snprintf(b, sizeof b, "0x%08x", v); return b; }
+
 static u32 rd32(const std::vector<u8>& v, size_t off = 0) {
     if (off + 4 > v.size()) return 0;
     return (u32)v[off] | ((u32)v[off + 1] << 8) | ((u32)v[off + 2] << 16) | ((u32)v[off + 3] << 24);
@@ -100,7 +102,7 @@ int main(int argc, char** argv) {
 
     // 7. pad + cdvd server hidup
     call(SRV_PAD, 1, {}, rep, res);
-    chk(res == 0 && rd32(rep, 0) == 0xFFFF, "pad state netral", "0x" + std::to_string(rd32(rep, 0)));
+    chk(res == 0 && rd32(rep, 0) == 0xFFFF, "pad state netral", hex32(rd32(rep, 0)));
     call(SRV_CDVD, 0, {}, rep, res);
     chk(res == 0 && rd32(rep, 0) == 1, "cdvd disk ready");
 
@@ -160,6 +162,38 @@ int main(int argc, char** argv) {
     auto hpath = std::filesystem::path(memcard::root()) / "mc0" / "BASLUS-21503" / "SAVE.DAT";
     chk(std::filesystem::exists(hpath, fec) && (u32)std::filesystem::file_size(hpath, fec) == 4096,
         "file save ada di disk host", hpath.string());
+
+    // 13. loadfile: word versi (fno 255) — nilai yang dibaca game @0x781ba8
+    called = call(SRV_LOADFILE, 255, {}, rep, res);
+    chk(called && rd32(rep, 0) == 0x30303133u, "loadfile fno255 = \"3100\"",
+        hex32(rd32(rep, 0)));
+
+    // 14. loadfile: LoadModule nama nyata -> file di extract/modules/irx ter-resolve
+    {
+        std::string name = "cdrom0:\\MODULES\\SIO2MAN.IRX;1";
+        std::vector<u8> req = u32s({0, 0});
+        for (char ch : name) req.push_back((u8)ch);
+        req.resize(8 + 252, 0);
+        called = call(SRV_LOADFILE, 0, req, rep, res);
+        chk(called && res == 0 && rd32(rep, 0) == 0, "loadfile LoadModule sio2man",
+            "modul=" + std::to_string(loadfile_load_count()) + " fail=" +
+            std::to_string(loadfile_load_fail_count()));
+    }
+
+    // 15. iopheap: alloc -> alamat di RAM IOP, free -> bisa dipakai ulang
+    called = call(SRV_IOPHEAP, 1, u32s({1024}), rep, res);
+    u32 hp1 = rd32(rep, 0);
+    chk(called && hp1 >= 0x00130000u && hp1 < 0x00200000u, "iopheap alloc 1024 B",
+        "addr=" + hex32(hp1));
+    call(SRV_IOPHEAP, 2, u32s({hp1}), rep, res);
+    called = call(SRV_IOPHEAP, 1, u32s({512}), rep, res);
+    chk(called && rd32(rep, 0) == hp1, "iopheap free+reuse addr sama",
+        "addr=" + hex32(rd32(rep, 0)));
+
+    // 16. sjx: create DTX (op 0x02) -> handle = buffer IOP yang dikirim game
+    called = call(SRV_SJX, 2, u32s({0, 0x003E9080u, 0x00130040u, 2176}), rep, res);
+    chk(called && rd32(rep, 0) == 0x00130040u, "sjx create DTX handle=iopbuf",
+        "handle=" + hex32(rd32(rep, 0)));
 
     const Stats& s = stats();
     std::printf("rpc stats: calls=%llu unknown=%llu in=%llu out=%llu\n",
