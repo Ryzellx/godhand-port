@@ -706,3 +706,173 @@ Perintah: `./build/adx_test --no-ffmpeg --stream-check --loop-state auto`
 - Semantik loop di hardware tetap belum diputuskan (default = `linear`, referensi vgmstream);
   `carry`/`reset` tersedia sebagai opsi.
 - Audio non-ADX (MPEG/SND di AFS, SFD/PSS) belum disentuh.
+
+### LOG 24 Okt 2026 — Phase 9d: konversi laju 24 kHz -> 48 kHz (SPU2) + satu API tarik 48 kHz
+
+**1) Masalah**
+
+Phase 9c berhenti dengan catatan jujur: `AdxStream` belum men-resample, jadi 8 stream 24 kHz
+keluar tetap 24 kHz. SPU2 hanya punya satu laju dasar (48 kHz pada basis 59,94 Hz NTSC); kalau
+stream 24 kHz diumpankan apa adanya, hasilnya 2x cepat dan timeline-nya separuh. Phase 9d
+menutup itu dengan konverter nyata, bukan pengambilan sampel terdekat.
+
+Sebaran laju seluruh AFS (dihitung dari header, bukan diasumsikan): **359 file 48 kHz, 8 file
+24 kHz**. Dari 8 itu, **7 file mono byte-identik** (`adx_m204/m208/m270/m328/m331/m360/m438_0000`:
+md5 `730906bf0e2f0e7927e9534c459439a7`, 21.226 B, 37.632 sampel) dan satu stereo
+`adx_m69_0000` (71.689 sampel). Artinya konverter hanya punya **2 sinyal unik** untuk diuji, dan
+**tidak ada satu pun loop native 24 kHz** — uji loop+resample karena itu memakai stream 48 kHz
+dengan target 24/96 kHz.
+
+**2) Yang dibangun**
+
+- `adx_resample_s16()` — one-shot, interleaved s16, windowed-sinc polifase.
+  Default `taps=128` per fase, Kaiser `beta=8.6`, passband `0.97` dari Nyquist sumber,
+  koefisien **Q23** (`int32`, akumulator `int64`), fase integer: rasio 24000:48000 direduksi
+  jadi `up=2, down=1` sehingga **2 fase eksak tanpa kuantisasi fase**. Panjang output
+  `ceil(in * up / down)`; 24k->48k berarti tepat 2x, bukan "kira-kira 2x".
+- `AdxRateConverter` — versi tarik untuk mixer: `process()`/`flush()`, blok arbitrer,
+  riwayat FIR dipangkas otomatis, `bypass` saat laju sudah sama (tanpa filter, tanpa salinan
+  tambahan).
+- `AdxPlayback` — satu pintu untuk runtime: `AdxStream` (decode + timeline loop) ->
+  `AdxRateConverter` (laju), satu `read()` mengembalikan s16 pada 48 kHz. Ini yang akan
+  dipanggil mixer, bukan dua kelas terpisah.
+- `--resample-check` di `src/shim/adx_test.cpp`: enam gate, semuanya membandingkan angka.
+
+**3) Hasil gate (5 run, semua log identik)**
+
+Perintah: `./build/adx_test --resample-check`
+
+Run pertama sesi penulisan gate (tabel A):
+
+| run | exit | file | blok exact | playback exact | wall | maxrss |
+|---|---|---|---|---|---|---|
+| 1 | 0 | 367/367 | 1.468/1.468 | 367/367 | 188,20 s | 295.672 KB |
+| 2 | 0 | 367/367 | 1.468/1.468 | 367/367 | 223,59 s | 295.744 KB |
+| 3 | 0 | 367/367 | 1.468/1.468 | 367/367 | 183,78 s | 295.736 KB |
+| 4 | 0 | 367/367 | 1.468/1.468 | 367/367 | 175,37 s | 295.724 KB |
+| 5 | 0 | 367/367 | 1.468/1.468 | 367/367 | 198,47 s | 295.808 KB |
+
+- **Verifikasi ulang (24 Okt 2026, 11:24–11:32 WIB)** — binary di-rebuild dari kerja terakhir,
+  gate dijalankan 5x lagi dari nol:
+
+| run | exit | file | blok exact | playback exact | wall | maxrss |
+|---|---|---|---|---|---|---|
+| 1 | 0 | 367/367 | 1.468/1.468 | 367/367 | 223,63 s | 295.832 KB |
+| 2 | 0 | 367/367 | 1.468/1.468 | 367/367 | 158,89 s | 295.832 KB |
+| 3 | 0 | 367/367 | 1.468/1.468 | 367/367 | 127,48 s | 295.420 KB |
+| 4 | 0 | 367/367 | 1.468/1.468 | 367/367 | 92,50 s | 295.832 KB |
+| 5 | 0 | 367/367 | 1.468/1.468 | 367/367 | 98,92 s | 295.412 KB |
+
+- Body log 5 run identik: sha1 `e60eb002aeba6608d532fd17fbf88becf34a0d3c`. Konvensi: **body =
+  seluruh 385 baris kecuali baris header `# adx_test: …`**; sha1 file utuh (`0ff0b8ca…`) bukan
+  yang dipakai, karena header memuat jumlah file/key yang bukan hasil gate.
+- Wall 92–224 s untuk pekerjaan yang sama (VPS 1 vCPU; run pertama dan kedua sesi sebelumnya
+  menabrak load host). **Determinisme diambil dari sha1 isi log, bukan dari wall** — angka gate
+  (367, 1.468, 572.592.917, 572.928.030) identik di 10 run yang tercatat di seksi ini.
+- **359 file bypass**: output konverter byte-identik dengan PCM native (359/359). 8 file
+  dikonversi; 572.592.917 frame input -> **572.928.030 frame output** (selisih = 2x dari 8 file
+  24 kHz, tepat).
+- **1.468 pembandingan blok** (blok 1, 7, 33, 4096 frame per kanal) semuanya byte-exact
+  terhadap jalur one-shot: 1.468/1.468.
+- `AdxPlayback` byte-exact terhadap jalur one-shot untuk **367/367** file, dan
+  `timeline_frames()` sama dengan panjang output nyata 367/367.
+
+**4) SNR: tiga pembanding berbeda, tiga arti berbeda**
+
+| Pembanding | Hasil | Artinya |
+|---|---|---|
+| Double-precision twin (kernel sama, tanpa Q23) | **105,60–106,76 dB** | galat fixed-point di bawah lantai 16-bit |
+| ffmpeg `swr` (penuh 0–24 kHz) | 29,56 dB min | desain filter beda; energi beda terkonsentrasi 8–12 kHz |
+| ffmpeg `swr`, dibatasi <8 kHz di kedua sisi | **70,39 dB min** | di pita yang benar-benar didengar, dua implementasi sepakat |
+| ffmpeg `soxr precision=28` (penuh) | 33,00 dB min | pembanding desain lain, bukan kebenaran |
+
+Angka 29,56 dB itu bukan error implementasi: pada file yang sama (`adx_m204_0000`, SFX pendek
+berenergi dekat Nyquist) SNR setelah kedua sinyal dibatasi 8 kHz adalah **70,39 dB**, dan
+terhadap kembaran double presisi mencapai **105,60 dB**. Yang berbeda di 8–12 kHz adalah
+transisi anti-image masing-masing resampler — wilayah di mana tidak ada "kebenaran" tunggal.
+Karena itu gate tidak menuntut 60 dB dari ffmpeg; yang dituntut: byte-exact vs jalur one-shot,
+>=60 dB vs referensi presisi, dan >=40 dB di pita <8 kHz.
+
+**5) Tone gate analitik (bebas dari decoder mana pun), kedua arah konversi**
+
+1 detik sinus 24 kHz -> 48 kHz, jendela koheren (integer cycle, mulai sampel 480):
+
+| f | gain | SINAD | image (24k-f) |
+|---|---|---|---|
+| 100 Hz | -0,000 dB | 86,27 dB | -116,23 dBc |
+| 1 kHz | -0,000 dB | 88,10 dB | -97,81 dBc |
+| 5 kHz | -0,000 dB | 89,02 dB | -102,37 dBc |
+| 8 kHz | -0,000 dB | 238,09 dB | -256,99 dBc |
+| 10 kHz | -0,000 dB | 96,64 dB | -107,49 dBc |
+| 11 kHz | -0,000 dB | 89,27 dB | -92,76 dBc |
+| 11,5 kHz | -2,102 dB | 47,55 dB | -47,55 dBc |
+
+Arah sebaliknya (desimasi 48 -> 24 kHz) punya mode kegagalan lain: isi di atas Nyquist baru
+harus **dipendam**, bukan dilipat. Diukur: tone 10 kHz lewat dengan gain **-0,002 dB**, dan
+tone 15 kHz (tidak punya tempat sah di 24 kHz) menyisakan **-87,74 dBc** di 9 kHz — angka itu
+persis lantai 1 LSB int16, artinya residunya di bawah yang bisa direpresentasikan.
+
+SINAD 86–96 dB berarti hasilnya sudah di lantai kuantisasi 16-bit (sinyal 10.000 LSB -> batas
+teoretis ~87 dB); 8 kHz keluar eksak karena pada 48 kHz periodenya 6 sampel. 11,5 kHz turun
+2,1 dB karena berada di transisi filter — konsekuensi `taps=128` + cutoff 0,97, bukan cacat.
+Gate menuntut: |gain| <= 0,05 dB dan SINAD >= 70 dB untuk f <= 10 kHz, image <= -60 dBc,
+gain 11 kHz >= -0,5 dB, ditambah desimasi |gain(10 kHz)| <= 0,05 dB dan residu alias <= -80 dBc.
+Lulus dengan margin.
+
+**6) Empat hal yang sempat salah**
+
+- **Skala kernel.** Versi pertama memakai `fc*sinc(fc*u)` sehingga cutoff efektif menjadi
+  fc/2 = 5,8 kHz. Yang membongkar bukan pembacaan kode, tapi tone gate: 11 kHz keluar
+  **-80,33 dB**. Diperbaiki ke `2*fc*sinc(2*fc*u)` (fc dalam siklus/sampel input).
+- **Q15 terlalu kasar untuk 128 tap.** Dengan koefisien Q15, SINAD jatuh ke **46,79 dB** di
+  10 kHz. Penyebabnya kuantisasi koefisien (~0,4% per tap pada 1/128). Naik ke Q23: SINAD
+  96,64 dB, dan SNR terhadap kembaran double 105,60 dB.
+- **Bug di harness sendiri.** Tone gate mula-mula membaca sampel di indeks `i` sementara fase
+  dihitung pada `i+skip`, sehingga SINAD turun monoton terhadap frekuensi (46 dB di 10 kHz)
+  padahal residual sebenarnya 0,10 LSB. Setelah indeks disamakan: 96,64 dB. Pelajaran: ukur
+  residual di domain spektrum sebelum menyalahkan filter.
+- **Asumsi yang gugur.** Rencana awal: resampler harus memotong `read()` di batas event loop,
+  kalau tidak riwayat FIR memuat audio dari sisi seam yang salah. Diukur: **0 beda** antara
+  memotong dan tidak memotong (52.439.352 frame, `adx_m66_0004`, 48->96 kHz), karena
+  `AdxStream::read()` memang sudah mengeluarkan urutan playback. Komentar header diganti
+  dengan fakta terukur. Yang benar-benar butuh `reset()` adalah lompatan eksplisit (seek/
+  retrigger): tanpa reset **199.736 dari 299.874 sampel** berbeda (fase ikut bergeser), dengan
+  reset byte-exact terhadap one-shot segmen itu (`RESETCHECK ... EXACT`, 100.000 frame).
+
+**7) Loop + resample**
+
+| file | konversi | frame | hasil |
+|---|---|---|---|
+| `adx_m1070_0000` | 48 -> 24 kHz | 123.840 | EXACT |
+| `adx_m69_0002` | 48 -> 24 kHz | 219.426 | EXACT |
+
+Yang dibandingkan: `AdxPlayback` (stream + konverter) dengan `render_loop()` yang di-resample
+satu tembakan. Total 343.266 frame, 0 beda.
+
+**8) Yang belum (jujur)**
+
+- Belum ada upload ke SPU2 / mixing / DSP; belum ada `sid` sound RPC (`0x80000006`,
+  `0x80000592`). `AdxPlayback` sudah siap dipanggil mixer, tapi mixer-nya belum ada.
+- Konverter hanya diuji pada **2 sinyal 24 kHz unik** (7 file mono identik) dan **tidak ada
+  loop native 24 kHz**; jalur loop+resample dibuktikan pada stream 48 kHz.
+- Audio non-ADX (MPEG/SND di AFS, SFD/PSS) belum disentuh.
+- Semantik loop di hardware tetap `linear` (referensi vgmstream); `carry`/`reset` tersedia.
+- Resampler tidak melakukan dithering; pembulatan ke int16 dilakukan dengan pembulatan
+  setengah-LSB (`+kRateHalf >> 23`), bukan noise-shaped dither.
+
+**9) Verifikasi ulang gate 9d (24 Okt 2026, 20:51–21:06 WIB)**
+
+Binary `build/adx_test` sha256 `52b1c58351317e59` (175.416 B), gate `--resample-check`
+dijalankan 5x berturut dari nol:
+
+| run | exit | body sha1 | wall | maxrss |
+|---|---|---|---|---|
+| 1 | 0 | `e60eb002…` | 154,65 s | 295.824 KB |
+| 2 | 0 | `e60eb002…` | 128,21 s | 295.800 KB |
+| 3 | 0 | `e60eb002…` | 148,82 s | 295.768 KB |
+| 4 | 0 | `e60eb002…` | 240,54 s | 295.768 KB |
+| 5 | 0 | `e60eb002…` | 202,04 s | 295.828 KB |
+
+Body sha1 identik dengan angka yang tercatat di tabel 3 — bukan run baru yang kebetulan
+mirip: `SUMMARY loopresample_checked=2 loopresample_exact=2 loopresample_frames=343266
+reset_checked=1 reset_exact=1` di kelima run, 385 baris body per run.

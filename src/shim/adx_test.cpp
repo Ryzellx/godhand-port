@@ -37,6 +37,12 @@ using gh::audio::AdxLoopRender;
 using gh::audio::AdxStream;
 using gh::audio::AdxStreamConfig;
 using gh::audio::AdxLoopState;
+using gh::audio::AdxRateConverter;
+using gh::audio::AdxPlayback;
+using gh::audio::AdxPlaybackConfig;
+using gh::audio::AdxResampleConfig;
+using gh::audio::adx_resample_out_frames;
+using gh::audio::adx_resample_s16;
 
 struct Options {
     std::vector<std::string> files;
@@ -53,6 +59,8 @@ struct Options {
     int loops = 1;                 // extra loop-body plays (vgmstream is run with -l loops+1)
     std::string wav_dir;           // optional: dump trimmed PCM to <dir>/<name>.wav
     bool stream_check = false;     // AdxStream (pull API) must equal render_loop byte-exact
+    bool resample_check = false;   // Phase 9d: rate conversion gate (streaming == one-shot, SNR)
+    uint32_t resample_rate = 48000;  // SPU2 rate the gate converts to
 };
 
 struct Compare {
@@ -702,6 +710,511 @@ int run_synth(const Options& o) {
     return failures;
 }
 
+// ── Phase 9d gate: 24 kHz streams -> SPU2 48 kHz ─────────────────────────────
+// Four independent checks, all with numbers rather than claims:
+//   1. one-shot converter vs streaming AdxRateConverter at block sizes 1/7/33/4096
+//      (byte equality: proves the runtime pull path is the same filter)
+//   2. SNR against ffmpeg's resampler (swr default and soxr) fed with OUR decoded
+//      native-rate PCM, so only the rate conversion is compared
+//   3. SNR against a double-precision twin of the same kernel (proves the fixed
+//      point coefficients/output rounding are below the 16-bit floor)
+//   4. analytic tone gate: passband gain, SINAD, image rejection at known inputs
+double pcm_snr_db(const std::vector<int16_t>& a, const std::vector<int16_t>& b, size_t* compared) {
+    const size_t n = std::min(a.size(), b.size());
+    double sig = 0.0, err = 0.0;
+    for (size_t i = 0; i < n; ++i) {
+        const double s = (double)a[i];
+        const double d = s - (double)b[i];
+        sig += s * s;
+        err += d * d;
+    }
+    if (compared) *compared = n;
+    if (sig <= 0.0) return 0.0;
+    return err > 0.0 ? 10.0 * std::log10(sig / err) : 999.0;
+}
+
+bool write_raw_s16(const std::string& path, const std::vector<int16_t>& pcm) {
+    FILE* f = std::fopen(path.c_str(), "wb");
+    if (!f) return false;
+    const size_t w = pcm.empty() ? 0 : std::fwrite(pcm.data(), 2, pcm.size(), f);
+    std::fclose(f);
+    return w == pcm.size();
+}
+
+bool read_raw_s16(const std::string& path, std::vector<int16_t>* out) {
+    FILE* f = std::fopen(path.c_str(), "rb");
+    if (!f) return false;
+    std::fseek(f, 0, SEEK_END);
+    const long n = std::ftell(f);
+    std::fseek(f, 0, SEEK_SET);
+    if (n <= 0) { std::fclose(f); return false; }
+    out->resize((size_t)n / 2);
+    const size_t got = std::fread(out->data(), 2, out->size(), f);
+    std::fclose(f);
+    return got == out->size();
+}
+
+double ref_i0(double x) {
+    double sum = 1.0, term = 1.0;
+    const double y = x * x * 0.25;
+    for (int k = 1; k <= 32; ++k) { term *= y / (double)(k * k); sum += term; if (term < 1e-16 * sum) break; }
+    return sum;
+}
+double ref_sinc(double v) {
+    if (std::fabs(v) < 1e-12) return 1.0;
+    const double a = M_PI * v;
+    return std::sin(a) / a;
+}
+uint32_t ref_gcd(uint32_t a, uint32_t b) { while (b) { const uint32_t t = a % b; a = b; b = t; } return a ? a : 1; }
+
+// Double-precision twin of adx_resample_s16(): same passband edge, same Kaiser
+// window, same tap count and phase arithmetic, but no Q15 coefficients and no
+// int16 rounding until the very end. Any SNR gap vs the library is therefore the
+// fixed-point cost alone.
+bool resample_reference_d(const std::vector<int16_t>& in, size_t frames, uint32_t in_rate,
+                          uint32_t ch, uint32_t out_rate, const AdxResampleConfig& cfg,
+                          std::vector<int16_t>* out) {
+    const uint32_t g = ref_gcd(in_rate, out_rate);
+    const uint32_t up = out_rate / g, down = in_rate / g;
+    const size_t out_n = ((uint64_t)frames * up + down - 1) / down;
+    out->assign(out_n * ch, 0);
+    if (in_rate == out_rate) {
+        std::memcpy(out->data(), in.data(), frames * ch * sizeof(int16_t));
+        return true;
+    }
+    const uint32_t K = cfg.taps;
+    const uint32_t phases = up <= 1024 ? up : (1u << (cfg.phase_bits ? cfg.phase_bits : 12));
+    const double fc = 0.5 * cfg.cutoff * (up <= down ? (double)up / (double)down : 1.0);
+    const double i0b = ref_i0(cfg.kaiser_beta);
+    std::vector<double> tab((size_t)phases * K, 0.0);
+    for (uint32_t ph = 0; ph < phases; ++ph) {
+        const double frac = (double)ph / (double)phases;
+        double sum = 0.0;
+        for (uint32_t t = 0; t < K; ++t) {
+            const double j = (double)t - (double)(K / 2);
+            const double x = 2.0 * (double)t / (double)(K - 1) - 1.0;
+            const double w = ref_i0(cfg.kaiser_beta * std::sqrt(std::max(0.0, 1.0 - x * x))) / i0b;
+            const double v = 2.0 * fc * ref_sinc(2.0 * fc * (j - frac)) * w;
+            tab[(size_t)ph * K + t] = v;
+            sum += v;
+        }
+        for (uint32_t t = 0; t < K; ++t) tab[(size_t)ph * K + t] /= sum;
+    }
+    for (size_t n = 0; n < out_n; ++n) {
+        const uint64_t t = (uint64_t)n * down;
+        const size_t q = (size_t)(t / up);
+        const uint32_t rem = (uint32_t)(t % up);
+        const uint32_t ph = up <= 1024 ? rem : (uint32_t)(((uint64_t)rem * phases) / up);
+        const double* row = tab.data() + (size_t)ph * K;
+        for (uint32_t c = 0; c < ch; ++c) {
+            double acc = 0.0;
+            for (uint32_t k = 0; k < K; ++k) {
+                const int64_t idx = (int64_t)q + (int64_t)k - (int64_t)(K / 2);
+                if (idx < 0 || idx >= (int64_t)frames) continue;
+                acc += (double)in[(size_t)idx * ch + c] * row[k];
+            }
+            const long v = std::lround(acc);
+            out->operator[](n * ch + c) = (int16_t)std::max(-32768L, std::min(32767L, v));
+        }
+    }
+    return true;
+}
+
+struct ToneMetrics { double gain_db = 0.0, sinad_db = 0.0, image_dbc = 0.0; };
+
+// Coherent measurement (integer cycles) so the number is filter error, not
+// leakage: 1 s of tone at 24 kHz, measured over 24000 output samples starting at
+// 480 (10 ms in, past the FIR start-up transient).
+ToneMetrics tone_metrics(const std::vector<int16_t>& out, uint32_t ch, double f, double fs, double amp) {
+    ToneMetrics m;
+    const size_t skip = 480, L = 24000;
+    double re = 0.0, im = 0.0;
+    for (size_t i = 0; i < L; ++i) {
+        const double th = 2.0 * M_PI * f * (double)(i + skip) / fs;
+        const double v = out[(i + skip) * ch];
+        re += v * std::cos(th);
+        im += v * std::sin(th);
+    }
+    const double a = 2.0 * re / (double)L, b = 2.0 * im / (double)L;
+    double res = 0.0;
+    for (size_t i = 0; i < L; ++i) {
+        const double th = 2.0 * M_PI * f * (double)(i + skip) / fs;
+        const double d = out[(i + skip) * ch] - (a * std::cos(th) + b * std::sin(th));
+        res += d * d;
+    }
+    const double rms_sig = std::sqrt((a * a + b * b) / 2.0);
+    const double rms_res = std::sqrt(res / (double)L);
+    m.gain_db = 20.0 * std::log10(std::max(rms_sig * std::sqrt(2.0), 1e-9) / amp);
+    m.sinad_db = 20.0 * std::log10(std::max(rms_sig, 1e-9) / std::max(rms_res, 1e-9));
+    const double fi = std::fabs((double)fs / 2.0 - f);   // 2x upsampling mirror
+    double ri = 0.0, ii = 0.0;
+    for (size_t i = 0; i < L; ++i) {
+        const double th = 2.0 * M_PI * fi * (double)(i + skip) / fs;
+        const double v = out[(i + skip) * ch];
+        ri += v * std::cos(th);
+        ii += v * std::sin(th);
+    }
+    const double rms_img = std::sqrt((std::pow(2.0 * ri / (double)L, 2.0) +
+                                      std::pow(2.0 * ii / (double)L, 2.0)) / 2.0);
+    m.image_dbc = 20.0 * std::log10(std::max(rms_img, 1e-9) / std::max(rms_sig, 1e-9));
+    return m;
+}
+
+ToneMetrics run_tone(double f, const AdxResampleConfig& cfg, uint32_t ch = 1) {
+    const double amp = 10000.0;
+    std::vector<int16_t> in(24000 * ch);
+    for (size_t i = 0; i < 24000; ++i) {
+        const int16_t v = (int16_t)std::lround(amp * std::sin(2.0 * M_PI * f * (double)i / 24000.0));
+        for (uint32_t c = 0; c < ch; ++c) in[i * ch + c] = v;
+    }
+    std::vector<int16_t> out;
+    std::string err;
+    adx_resample_s16(in.data(), 24000, 24000, ch, 48000, cfg, &out, &err);
+    return tone_metrics(out, ch, f, 48000.0, amp);
+}
+
+// Decimation has the opposite failure mode to upsampling: content above the new
+// Nyquist must be buried, not folded back. A 15 kHz tone at 48 kHz has no legal
+// home in a 24 kHz output; a broken decimator would fold it onto 9 kHz.
+struct DecimMetrics { double gain_db = 0.0, alias_dbc = 0.0; };
+
+DecimMetrics decimation_tone(double f_in, const AdxResampleConfig& cfg) {
+    DecimMetrics m;
+    const double amp = 10000.0;
+    std::vector<int16_t> in(48000), out;
+    for (size_t i = 0; i < in.size(); ++i) {
+        in[i] = (int16_t)std::lround(amp * std::sin(2.0 * M_PI * f_in * (double)i / 48000.0));
+    }
+    std::string err;
+    adx_resample_s16(in.data(), in.size(), 48000, 1, 24000, cfg, &out, &err);
+    const size_t skip = 480, L = 8000;   // 8000 samples at 24 kHz: integer cycles for k*3 Hz
+    auto amp_at = [&](double f) {
+        double re = 0.0, im = 0.0;
+        for (size_t i = 0; i < L; ++i) {
+            const double th = 2.0 * M_PI * f * (double)(i + skip) / 24000.0;
+            const double v = out[i + skip];
+            re += v * std::cos(th);
+            im += v * std::sin(th);
+        }
+        return std::sqrt((std::pow(2.0 * re / (double)L, 2.0) + std::pow(2.0 * im / (double)L, 2.0)) / 2.0);
+    };
+    const double a_sig = amp_at(f_in < 12000.0 ? f_in : 24000.0 - f_in);
+    m.gain_db = 20.0 * std::log10(std::max(a_sig * std::sqrt(2.0), 1e-9) / amp);
+    // A decimated 15 kHz tone lands below one int16 LSB in steady state, so the
+    // alias figure is reported against the quantisation floor (0.29 LSB RMS),
+    // not against an arbitrarily small measured number.
+    const double rms_floor = 0.29;
+    m.alias_dbc = 20.0 * std::log10(std::max(a_sig, rms_floor) / amp * std::sqrt(2.0));
+    return m;
+}
+
+struct ResampleStats {
+    size_t checked = 0, pass = 0, fail = 0, bypass = 0, not_bypass = 0;
+    size_t block_checks = 0, block_exact = 0, len_ok = 0, ident_ok = 0;
+    size_t playback_checks = 0, playback_exact = 0, timeline_len_ok = 0;
+    size_t in_frames = 0, out_frames = 0;
+    double snr_swr_min = 1e9, snr_soxr_min = 1e9, prec_min = 1e9, band_min = 1e9;
+    double snr_swr_worst = 0.0, snr_soxr_worst = 0.0, prec_worst = 0.0;
+    std::string worst_swr_file, worst_prec_file;
+};
+
+ResampleStats run_resample_check(const Options& o, const AdxKey& key) {
+    ResampleStats st;
+    const uint32_t target = o.resample_rate;
+    AdxResampleConfig cfg;
+    const uint32_t blocks[] = {1, 7, 33, 4096};
+    run_cmd("mkdir -p " + shell_quote(o.tmp));
+
+    for (size_t fi = 0; fi < o.files.size(); ++fi) {
+        const std::string& f = o.files[fi];
+        std::vector<uint8_t> src;
+        if (!read_file(f, &src)) {
+            std::printf("RESAMPLE %-28s read failed\n", stem_of(f).c_str());
+            ++st.fail;
+            continue;
+        }
+        AdxDecoder dec;
+        std::string err;
+        if (!dec.init(src.data(), src.size(), AdxFlavor::Cri, key, &err)) {
+            std::printf("RESAMPLE %-28s init failed: %s\n", stem_of(f).c_str(), err.c_str());
+            ++st.fail;
+            continue;
+        }
+        const uint32_t sr = dec.header().sample_rate;
+        const uint32_t ch = dec.header().channels;
+        const std::vector<int16_t>& native = dec.decode_trimmed();
+        const size_t frames = dec.samples_per_channel_trimmed();
+        const bool bypass = (sr == target);
+
+        std::vector<int16_t> oneshot;
+        const bool res_ok = adx_resample_s16(native.data(), frames, sr, ch, target, cfg, &oneshot, &err);
+        const size_t want = adx_resample_out_frames(frames, sr, target);
+        const bool len_ok = res_ok && oneshot.size() == want * ch;
+        if (len_ok) ++st.len_ok;
+
+        // 1) streaming converter == one-shot, for every block size
+        size_t exact_blocks = 0;
+        if (res_ok) {
+            for (uint32_t bs : blocks) {
+                AdxRateConverter cv;
+                if (!cv.init(sr, target, ch, cfg, &err)) break;
+                std::vector<int16_t> got;
+                got.reserve(want * ch + (size_t)bs * ch);
+                std::vector<int16_t> ob((size_t)bs * target / (sr ? sr : 1) * ch + 256 * ch);
+                for (size_t off = 0; off < frames; off += bs) {
+                    const size_t n = std::min<size_t>(bs, frames - off);
+                    const size_t w = cv.process(native.data() + off * ch, n, ob.data(), ob.size() / ch);
+                    got.insert(got.end(), ob.begin(), ob.begin() + (long)(w * ch));
+                }
+                size_t w = cv.flush(ob.data(), ob.size() / ch);
+                got.insert(got.end(), ob.begin(), ob.begin() + (long)(w * ch));
+                ++st.block_checks;
+                if (got.size() == oneshot.size() &&
+                    (got.empty() || std::memcmp(got.data(), oneshot.data(), got.size() * 2) == 0)) {
+                    ++exact_blocks;
+                    ++st.block_exact;
+                }
+            }
+        }
+
+        // 1b) AdxPlayback (stream + converter behind one pull API) == one-shot
+        bool playback_same = false;
+        if (res_ok) {
+            AdxPlaybackConfig pc;
+            pc.out_rate = target;
+            pc.loops = 0;
+            pc.tail = true;
+            pc.state = AdxLoopState::Linear;
+            AdxPlayback pb;
+            if (pb.open(src.data(), src.size(), AdxFlavor::Cri, key, pc, &err)) {
+                std::vector<int16_t> got;
+                std::vector<int16_t> buf((size_t)2048 * ch);
+                got.reserve(oneshot.size());
+                for (;;) {
+                    const size_t w = pb.read(buf.data(), 2048);
+                    if (w == 0) break;
+                    got.insert(got.end(), buf.begin(), buf.begin() + (long)(w * ch));
+                }
+                ++st.playback_checks;
+                if (pb.timeline_frames() == want) ++st.timeline_len_ok;
+                playback_same = got.size() == oneshot.size() &&
+                                (got.empty() || std::memcmp(got.data(), oneshot.data(), got.size() * 2) == 0);
+                if (playback_same) ++st.playback_exact;
+            }
+        }
+
+        // 2) ffmpeg reference from OUR native PCM (only the rate conversion is compared)
+        double snr_swr = 0.0, snr_soxr = 0.0, snr_band = 0.0;
+        size_t ref_frames = 0;
+        if (!bypass && res_ok) {
+            const std::string base = o.tmp + "/rs_" + stem_of(f);
+            const std::string nat = base + "_nat.raw";
+            const std::string swr = base + "_swr.raw";
+            const std::string soxr = base + "_soxr.raw";
+            if (write_raw_s16(nat, native)) {
+                const std::string in_args = " -v error -y -f s16le -ar " + std::to_string(sr) +
+                                            " -ac " + std::to_string(ch) + " -i " + shell_quote(nat);
+                const std::string out_args = " -f s16le " + shell_quote(swr);
+                run_cmd(shell_quote(o.ffmpeg) + in_args + " -ar " + std::to_string(target) + out_args);
+                run_cmd(shell_quote(o.ffmpeg) + in_args + " -af aresample=resampler=soxr:precision=28:osr=" +
+                        std::to_string(target) + out_args.substr(0, out_args.find(shell_quote(swr))) +
+                        " -f s16le " + shell_quote(soxr));
+                std::vector<int16_t> a, b;
+                if (read_raw_s16(swr, &a)) {
+                    size_t cmp = 0;
+                    snr_swr = pcm_snr_db(oneshot, a, &cmp);
+                    ref_frames = a.size() / ch;
+                    if (snr_swr < st.snr_swr_min) { st.snr_swr_min = snr_swr; st.worst_swr_file = stem_of(f); }
+                    // Same comparison once both are band-limited to <8 kHz with the
+                    // SAME filter on both sides: isolates design differences in the
+                    // 8..12 kHz anti-image region from everything else.
+                    AdxResampleConfig lp;
+                    lp.cutoff = 1.0;
+                    std::vector<int16_t> bo, bs;
+                    if (adx_resample_s16(oneshot.data(), oneshot.size() / ch, target, ch, 16000, lp, &bo, &err) &&
+                        adx_resample_s16(a.data(), a.size() / ch, target, ch, 16000, lp, &bs, &err)) {
+                        snr_band = pcm_snr_db(bo, bs, &cmp);
+                        if (snr_band < st.band_min) st.band_min = snr_band;
+                    }
+                }
+                if (read_raw_s16(soxr, &b)) {
+                    size_t cmp = 0;
+                    snr_soxr = pcm_snr_db(oneshot, b, &cmp);
+                    if (snr_soxr < st.snr_soxr_min) st.snr_soxr_min = snr_soxr;
+                }
+                std::remove(nat.c_str());
+                std::remove(swr.c_str());
+                std::remove(soxr.c_str());
+            }
+        }
+
+        // 3) fixed point vs the double-precision twin of the same kernel
+        double prec = 0.0;
+        if (!bypass && res_ok) {
+            std::vector<int16_t> refd;
+            if (resample_reference_d(native, frames, sr, ch, target, cfg, &refd)) {
+                size_t cmp = 0;
+                prec = pcm_snr_db(oneshot, refd, &cmp);
+                if (prec < st.prec_min) { st.prec_min = prec; st.worst_prec_file = stem_of(f); }
+            }
+        }
+
+        if (bypass && res_ok) {
+            ++st.bypass;
+            if (oneshot.size() == native.size() &&
+                (native.empty() || std::memcmp(oneshot.data(), native.data(), native.size() * 2) == 0)) {
+                ++st.ident_ok;
+            }
+        } else {
+            ++st.not_bypass;
+        }
+
+        const bool pass = res_ok && len_ok && playback_same &&
+                          exact_blocks == (size_t)(sizeof(blocks) / sizeof(blocks[0])) &&
+                          (bypass ? oneshot.size() == native.size()
+                                  : (prec >= 60.0 && snr_band >= 40.0 && snr_swr >= 20.0));
+        if (pass) ++st.pass; else ++st.fail;
+        ++st.checked;
+        st.in_frames += frames;
+        st.out_frames += want;
+
+        std::printf("RESAMPLE %-28s in_sr=%5u ch=%u in_frames=%7zu out_sr=%u out_frames=%7zu ref_frames=%7zu "
+                    "len_ok=%d playback=%d block_exact=%zu/%zu snr_swr=%6.2f snr_band8k=%6.2f snr_soxr=%6.2f refprec=%6.2f %s\n",
+                    stem_of(f).c_str(), sr, ch, frames, target, want, ref_frames, len_ok ? 1 : 0,
+                    playback_same ? 1 : 0, exact_blocks, sizeof(blocks) / sizeof(blocks[0]), snr_swr,
+                    snr_band, snr_soxr, prec,
+                    pass ? "PASS" : "FAIL");
+    }
+
+    // 4) analytic tone gate (independent of any decoder)
+    const double freqs[] = {100.0, 1000.0, 5000.0, 8000.0, 10000.0, 11000.0, 11500.0};
+    double worst_gain = 0.0, worst_sinad = 1e9, worst_image = -1e9, gain_11k = 0.0;
+    for (double f : freqs) {
+        const ToneMetrics m = run_tone(f, cfg);
+        std::printf("TONE %6.0f Hz gain=%+7.3f dB sinad=%6.2f dB image=%+7.2f dBc\n", f, m.gain_db,
+                    m.sinad_db, m.image_dbc);
+        if (f <= 10000.0) {
+            if (std::fabs(m.gain_db) > std::fabs(worst_gain)) worst_gain = m.gain_db;
+            if (m.sinad_db < worst_sinad) worst_sinad = m.sinad_db;
+            if (m.image_dbc > worst_image) worst_image = m.image_dbc;
+        } else if (f == 11000.0) {
+            gain_11k = m.gain_db;
+        }
+    }
+    const DecimMetrics d_ok = decimation_tone(10000.0, cfg);   // legal band
+    const DecimMetrics d_alias = decimation_tone(15000.0, cfg);  // must be buried
+    std::printf("TONE decim 48->24k 10 kHz gain=%+7.3f dB | 15 kHz residue at 9 kHz=%+7.2f dBc "
+                "(floor = 1 int16 LSB)\n", d_ok.gain_db, d_alias.alias_dbc);
+    const bool decim_pass = std::fabs(d_ok.gain_db) <= 0.05 && d_alias.alias_dbc <= -80.0;
+    const bool tone_pass = std::fabs(worst_gain) <= 0.05 && worst_sinad >= 70.0 &&
+                           worst_image <= -60.0 && gain_11k >= -0.5 && decim_pass;
+    std::printf("SUMMARY tone_gate=%s worst_gain=%+.4f dB worst_sinad=%.2f dB worst_image=%+.2f dBc "
+                "gain_11k=%+.3f dB decim_alias=%+.2f dBc\n",
+                tone_pass ? "PASS" : "FAIL", worst_gain, worst_sinad, worst_image, gain_11k,
+                d_alias.alias_dbc);
+    if (!tone_pass) ++st.fail;
+
+    // 5) loop timeline resample: one-shot render vs AdxStream + converter
+    size_t loop_checked = 0, loop_exact = 0, loop_frames = 0;
+    for (size_t fi = 0; fi < o.files.size() && loop_checked < 2; ++fi) {
+        std::vector<uint8_t> src;
+        if (!read_file(o.files[fi], &src)) continue;
+        AdxDecoder dec;
+        std::string err;
+        if (!dec.init(src.data(), src.size(), AdxFlavor::Cri, key, &err)) continue;
+        if (!dec.header().loop || dec.header().sample_count > 400000) continue;
+        const uint32_t ch = dec.header().channels;
+        const uint32_t sr = dec.header().sample_rate;
+        const uint32_t out_rate = sr / 2;           // force real filtering, keep memory small
+        if (out_rate == 0) continue;
+
+        AdxLoopRender lr;
+        lr.loops = 1;
+        lr.tail = true;
+        lr.state = AdxLoopState::Linear;
+        std::vector<int16_t> timeline;
+        if (!dec.render_loop(lr, &timeline, &err)) continue;
+        std::vector<int16_t> ref;
+        if (!adx_resample_s16(timeline.data(), timeline.size() / ch, sr, ch, out_rate, cfg, &ref, &err)) continue;
+
+        AdxPlaybackConfig pc;
+        pc.out_rate = out_rate;
+        pc.loops = 1;
+        pc.tail = true;
+        pc.state = AdxLoopState::Linear;
+        AdxPlayback pb;
+        if (!pb.open(src.data(), src.size(), AdxFlavor::Cri, key, pc, &err)) continue;
+        std::vector<int16_t> got, ib(1024 * ch);
+        for (;;) {
+            const size_t w = pb.read(ib.data(), 1024);
+            if (w == 0) break;
+            got.insert(got.end(), ib.begin(), ib.begin() + (long)(w * ch));
+        }
+        ++loop_checked;
+        const bool same = got.size() == ref.size() &&
+                          (got.empty() || std::memcmp(got.data(), ref.data(), got.size() * 2) == 0);
+        if (same) ++loop_exact;
+        loop_frames += ref.size() / ch;
+        std::printf("LOOPRESAMPLE %-24s %u->%u Hz frames=%zu %s\n", stem_of(o.files[fi]).c_str(), sr, out_rate,
+                    ref.size() / ch, same ? "EXACT" : "DIFF");
+    }
+    if (loop_checked != loop_exact) ++st.fail;
+
+    // 6) reset() after an explicit discontinuity == one-shot on the new segment
+    size_t reset_ok = 0, reset_checked = 0;
+    for (size_t fi = 0; fi < o.files.size() && reset_checked == 0; ++fi) {
+        std::vector<uint8_t> src;
+        if (!read_file(o.files[fi], &src)) continue;
+        AdxDecoder dec;
+        std::string err;
+        if (!dec.init(src.data(), src.size(), AdxFlavor::Cri, key, &err)) continue;
+        const uint32_t ch = dec.header().channels;
+        const uint32_t sr = dec.header().sample_rate;
+        if (sr != 48000) continue;                  // pick a 48 kHz stream so the ratio is 2:1
+        const std::vector<int16_t>& pcm = dec.decode_trimmed();
+        const size_t n = dec.samples_per_channel_trimmed();
+        if (n < 200000) continue;
+        const size_t off = 100000, len = std::min<size_t>(50000, n - off);
+        const uint32_t out_rate = 96000;
+        std::vector<int16_t> ref;
+        if (!adx_resample_s16(pcm.data() + off * ch, len, sr, ch, out_rate, cfg, &ref, &err)) continue;
+        AdxRateConverter cv;
+        if (!cv.init(sr, out_rate, ch, cfg, &err)) continue;
+        std::vector<int16_t> junk, got, ob(200000 * ch);
+        cv.process(pcm.data(), off, ob.data(), ob.size() / ch);   // history from the wrong place
+        cv.reset();
+        size_t w = cv.process(pcm.data() + off * ch, len, ob.data(), ob.size() / ch);
+        got.insert(got.end(), ob.begin(), ob.begin() + (long)(w * ch));
+        w = cv.flush(ob.data(), ob.size() / ch);
+        got.insert(got.end(), ob.begin(), ob.begin() + (long)(w * ch));
+        ++reset_checked;
+        const bool same = got.size() == ref.size() &&
+                          (got.empty() || std::memcmp(got.data(), ref.data(), got.size() * 2) == 0);
+        if (same) ++reset_ok;
+        std::printf("RESETCHECK %-24s frames=%zu %s\n", stem_of(o.files[fi]).c_str(), ref.size() / ch,
+                    same ? "EXACT" : "DIFF");
+    }
+    if (reset_checked != reset_ok) ++st.fail;
+
+    if (st.snr_swr_min > 1e8) st.snr_swr_min = 0.0;
+    if (st.snr_soxr_min > 1e8) st.snr_soxr_min = 0.0;
+    if (st.prec_min > 1e8) st.prec_min = 0.0;
+    if (st.band_min > 1e8) st.band_min = 0.0;
+    std::printf("SUMMARY resample_files=%zu pass=%zu fail=%zu bypass=%zu converted=%zu in_frames=%zu out_frames=%zu\n",
+                st.checked, st.pass, st.fail, st.bypass, st.not_bypass, st.in_frames, st.out_frames);
+    std::printf("SUMMARY resample_blocks_checked=%zu resample_blocks_exact=%zu len_ok=%zu bypass_identity=%zu/%zu\n",
+                st.block_checks, st.block_exact, st.len_ok, st.ident_ok, st.bypass);
+    std::printf("SUMMARY playback_checked=%zu playback_exact=%zu timeline_len_ok=%zu\n",
+                st.playback_checks, st.playback_exact, st.timeline_len_ok);
+    std::printf("SUMMARY resample_snr_swr_min=%.2f dB (%s) resample_snr_band8k_min=%.2f dB "
+                "resample_snr_soxr_min=%.2f dB refprec_min=%.2f dB (%s)\n",
+                st.snr_swr_min, st.worst_swr_file.c_str(), st.band_min, st.snr_soxr_min, st.prec_min,
+                st.worst_prec_file.c_str());
+    std::printf("SUMMARY loopresample_checked=%zu loopresample_exact=%zu loopresample_frames=%zu reset_checked=%zu reset_exact=%zu\n",
+                loop_checked, loop_exact, loop_frames, reset_checked, reset_ok);
+    return st;
+}
+
 void usage() {
     std::printf(
         "usage: adx_test [options] [file.adx ...]\n"
@@ -718,6 +1231,10 @@ void usage() {
         "  --wav <dir>         dump trimmed PCM (and one looped pass) as 16-bit WAV\n"
         "  --stream-check      pull the loop timeline through AdxStream at several block sizes\n"
         "                      and require byte equality with render_loop (same --loop-state)\n"
+        "  --resample-check    Phase 9d rate-conversion gate: streaming==one-shot at every\n"
+        "                      block size, SNR vs ffmpeg swr/soxr and vs a double-precision\n"
+        "                      twin, analytic tone gate, loop-timeline resample, reset()\n"
+        "  --resample-rate <n> target rate for --resample-check (default 48000 = SPU2)\n"
         "  --no-ffmpeg         decode + vgmstream self-check only\n");
 }
 
@@ -743,6 +1260,8 @@ int main(int argc, char** argv) {
         else if (a == "--synth") o.synth = true;
         else if (a == "--no-ffmpeg") o.skip_ffmpeg = true;
         else if (a == "--stream-check") o.stream_check = true;
+        else if (a == "--resample-check") o.resample_check = true;
+        else if (a == "--resample-rate") o.resample_rate = (uint32_t)std::strtoul(next("--resample-rate").c_str(), nullptr, 10);
         else if (a == "--loop-render") o.loop_render = true;
         else if (a == "--loop-state") o.loop_state = next("--loop-state");
         else if (a == "--loops") o.loops = (int)std::strtol(next("--loops").c_str(), nullptr, 10);
@@ -788,6 +1307,11 @@ int main(int argc, char** argv) {
     const AdxKey key = gh::audio::adx_key_from_keystring(o.key.c_str());
     std::printf("# adx_test: files=%zu key=\"%s\" (%04X/%04X/%04X) flavors=cri+libavcodec\n", o.files.size(),
                 o.key.c_str(), key.start, key.mult, key.add);
+
+    if (o.resample_check) {
+        const ResampleStats rs = run_resample_check(o, key);
+        return rs.fail == 0 ? 0 : 1;
+    }
 
     size_t pass = 0, fail = 0, ffmpeg_exact = 0, vgm_checked = 0, vgm_exact = 0;
     size_t loops = 0, loop_ok_checked = 0;

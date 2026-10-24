@@ -18,8 +18,10 @@
 // yields start=0x49E1 mult=0x4A57 add=0x553D.
 #include "adx.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 namespace gh {
@@ -776,6 +778,418 @@ size_t AdxStream::read(int16_t* out, size_t frames) {
         if (pos_ == limit_) advance_segment();
     }
     return produced;
+}
+
+// ── Phase 9d: sample-rate conversion (24 kHz streams -> SPU2 48 kHz) ─────────
+//
+// Windowed-sinc polyphase converter, integer phase arithmetic. The phase index
+// is exact when the reduced ratio is small (24000:48000 -> 2 phases), otherwise
+// quantised to 2^phase_bits rows; either way the ratio itself is never rounded,
+// so output length is ceil(in * up / down) with no drift.
+namespace {
+
+double kaiser_i0(double x) {
+    // I0(x) = sum_k (x^2/4)^k / (k!)^2 ; 32 terms is plenty for beta <= 12.
+    double sum = 1.0, term = 1.0;
+    const double y = x * x * 0.25;
+    for (int k = 1; k <= 32; ++k) {
+        term *= y / (double)(k * k);
+        sum += term;
+        if (term < 1e-16 * sum) break;
+    }
+    return sum;
+}
+
+double sinc_pi(double v) {
+    if (std::fabs(v) < 1e-12) return 1.0;
+    const double a = 3.14159265358979323846 * v;
+    return std::sin(a) / a;
+}
+
+uint32_t gcd_u32(uint32_t a, uint32_t b) {
+    while (b != 0) {
+        const uint32_t t = a % b;
+        a = b;
+        b = t;
+    }
+    return a ? a : 1;
+}
+
+int16_t clamp_s16(int64_t v) {
+    if (v > 32767) return (int16_t)32767;
+    if (v < -32768) return (int16_t)-32768;
+    return (int16_t)v;
+}
+
+constexpr int32_t kRateShift = 23;                 // Q23 coefficients
+constexpr int32_t kRateOne = 1 << kRateShift;      // 1.0 in Q23
+constexpr int32_t kRateHalf = kRateOne >> 1;
+
+struct RatePlan {
+    uint32_t up     = 1;      // output frames per `down` input frames
+    uint32_t down   = 1;
+    uint32_t phases = 1;      // coefficient rows
+    bool     exact  = true;   // phases == up (no phase quantisation)
+};
+
+bool build_rate_coefs(uint32_t in_rate, uint32_t out_rate, const AdxResampleConfig& cfg,
+                      RatePlan* plan, std::vector<int32_t>* coef, std::string* err) {
+    if (in_rate == 0 || out_rate == 0) {
+        if (err) *err = "resample: zero sample rate";
+        return false;
+    }
+    if (cfg.taps < 8 || (cfg.taps & 1) != 0) {
+        if (err) *err = "resample: taps must be even and >= 8";
+        return false;
+    }
+    if (!(cfg.cutoff > 0.0 && cfg.cutoff <= 1.0)) {
+        if (err) *err = "resample: cutoff must be in (0,1]";
+        return false;
+    }
+
+    const uint32_t g = gcd_u32(in_rate, out_rate);
+    plan->up = out_rate / g;
+    plan->down = in_rate / g;
+    plan->exact = plan->up <= 1024;
+    const uint32_t bits = cfg.phase_bits ? cfg.phase_bits : 12;
+    plan->phases = plan->exact ? plan->up : ((uint32_t)1 << bits);
+    if (plan->phases == 0) plan->phases = 1;
+
+    const uint32_t K = cfg.taps;
+    // Passband edge in CYCLES PER INPUT SAMPLE (not Nyquist units: the kernel is
+    // 2*fc*sinc(2*fc*u), so 0.5 == input Nyquist). Scaled by up/down when the
+    // output rate is lower, otherwise the new Nyquist would alias.
+    const double fc = 0.5 * cfg.cutoff *
+                      (plan->up <= plan->down ? (double)plan->up / (double)plan->down : 1.0);
+    const double i0b = kaiser_i0(cfg.kaiser_beta);
+    coef->assign((size_t)plan->phases * K, 0);
+
+    std::vector<double> h(K, 0.0);
+    for (uint32_t ph = 0; ph < plan->phases; ++ph) {
+        const double frac = (double)ph / (double)plan->phases;
+        double sum = 0.0;
+        for (uint32_t t = 0; t < K; ++t) {
+            const double j = (double)t - (double)(K / 2);
+            const double x = 2.0 * (double)t / (double)(K - 1) - 1.0;
+            const double w = kaiser_i0(cfg.kaiser_beta * std::sqrt(std::max(0.0, 1.0 - x * x))) / i0b;
+            h[t] = 2.0 * fc * sinc_pi(2.0 * fc * (j - frac)) * w;
+            sum += h[t];
+        }
+        if (std::fabs(sum) < 1e-12) {
+            if (err) *err = "resample: degenerate coefficient sum";
+            return false;
+        }
+        int32_t* row = coef->data() + (size_t)ph * K;
+        int32_t acc_q = 0;
+        uint32_t peak = 0;
+        for (uint32_t t = 0; t < K; ++t) {
+            const long q = (long)std::llround(h[t] / sum * (double)kRateOne);
+            row[t] = (int32_t)q;
+            acc_q += (int32_t)q;
+            if (std::abs(row[t]) > std::abs(row[peak])) peak = t;
+        }
+        row[peak] += kRateOne - acc_q;   // DC gain is exactly 1 in Q23 after rounding
+    }
+    return true;
+}
+
+}  // namespace
+
+size_t adx_resample_out_frames(size_t in_frames, uint32_t in_rate, uint32_t out_rate) {
+    if (in_rate == 0 || out_rate == 0) return 0;
+    const uint32_t g = gcd_u32(in_rate, out_rate);
+    const uint64_t up = out_rate / g;
+    const uint64_t down = in_rate / g;
+    return (size_t)(((uint64_t)in_frames * up + down - 1) / down);
+}
+
+bool adx_resample_s16(const int16_t* in, size_t in_frames, uint32_t in_rate, uint32_t channels,
+                      uint32_t out_rate, const AdxResampleConfig& cfg,
+                      std::vector<int16_t>* out, std::string* err) {
+    if (err) err->clear();
+    if (out == nullptr || channels == 0 || channels > kAdxMaxChannels) {
+        if (err) *err = "resample: bad channels/out";
+        return false;
+    }
+    const size_t out_n = adx_resample_out_frames(in_frames, in_rate, out_rate);
+    out->assign(out_n * channels, 0);
+    if (in_frames == 0) return true;
+    if (in == nullptr) {
+        if (err) *err = "resample: null input";
+        out->clear();
+        return false;
+    }
+    if (in_rate == out_rate) {   // already at the target rate: copy, never filter
+        std::memcpy(out->data(), in, in_frames * channels * sizeof(int16_t));
+        return true;
+    }
+
+    RatePlan plan;
+    std::vector<int32_t> coef;
+    if (!build_rate_coefs(in_rate, out_rate, cfg, &plan, &coef, err)) {
+        out->clear();
+        return false;
+    }
+
+    const uint32_t K = cfg.taps;
+    const int64_t half = (int64_t)(K / 2);
+    const int64_t in_n = (int64_t)in_frames;
+    for (size_t n = 0; n < out_n; ++n) {
+        const uint64_t t = (uint64_t)n * plan.down;
+        const size_t q = (size_t)(t / plan.up);
+        const uint32_t rem = (uint32_t)(t % plan.up);
+        const uint32_t ph = plan.exact ? rem
+                                       : (uint32_t)(((uint64_t)rem * plan.phases) / plan.up);
+        const int32_t* row = coef.data() + (size_t)ph * K;
+        const int64_t base = (int64_t)q - half;
+        for (uint32_t ch = 0; ch < channels; ++ch) {
+            int64_t acc = 0;
+            for (uint32_t k = 0; k < K; ++k) {
+                const int64_t idx = base + (int64_t)k;
+                if (idx < 0 || idx >= in_n) continue;   // zero-pad the edges
+                acc += (int64_t)in[(size_t)idx * channels + ch] * row[k];
+            }
+            const int32_t v = (int32_t)((acc + kRateHalf) >> kRateShift);
+            (*out)[n * channels + ch] = cfg.clamp ? clamp_s16(v) : (int16_t)v;
+        }
+    }
+    return true;
+}
+
+bool adx_decode_file_resampled(const char* path, AdxFlavor flavor, const AdxKey& key,
+                               uint32_t out_rate, const AdxResampleConfig& cfg,
+                               AdxHeader* header, std::vector<int16_t>* pcm, size_t* out_frames,
+                               std::string* err) {
+    if (pcm == nullptr) {
+        if (err) *err = "resample: null pcm";
+        return false;
+    }
+    FILE* f = std::fopen(path, "rb");
+    if (!f) {
+        if (err) *err = std::string("cannot open ") + path;
+        return false;
+    }
+    std::vector<uint8_t> buf;
+    std::fseek(f, 0, SEEK_END);
+    const long n = std::ftell(f);
+    std::fseek(f, 0, SEEK_SET);
+    if (n <= 0) {
+        std::fclose(f);
+        if (err) *err = "empty file";
+        return false;
+    }
+    buf.resize((size_t)n);
+    const size_t got = std::fread(buf.data(), 1, buf.size(), f);
+    std::fclose(f);
+    if (got != buf.size()) {
+        if (err) *err = "short read";
+        return false;
+    }
+
+    AdxDecoder dec;
+    if (!dec.init(buf.data(), buf.size(), flavor, key, err)) return false;
+    if (header) *header = dec.header();
+    const std::vector<int16_t>& native = dec.decode_trimmed();
+    const size_t frames = dec.samples_per_channel_trimmed();
+    if (!adx_resample_s16(native.data(), frames, dec.header().sample_rate, dec.header().channels,
+                          out_rate, cfg, pcm, err)) {
+        return false;
+    }
+    if (out_frames) *out_frames = adx_resample_out_frames(frames, dec.header().sample_rate, out_rate);
+    return true;
+}
+
+bool AdxRateConverter::init(uint32_t in_rate, uint32_t out_rate, uint32_t channels,
+                            const AdxResampleConfig& cfg, std::string* err) {
+    reset();
+    ok_ = false;
+    if (channels == 0 || channels > kAdxMaxChannels) {
+        if (err) *err = "rate: bad channel count";
+        return false;
+    }
+    in_rate_ = in_rate;
+    out_rate_ = out_rate;
+    channels_ = channels;
+    if (in_rate == 0 || out_rate == 0) {
+        if (err) *err = "rate: zero rate";
+        return false;
+    }
+    if (in_rate == out_rate) {
+        bypass_ = true;
+        ok_ = true;
+        return true;
+    }
+    RatePlan plan;
+    if (!build_rate_coefs(in_rate, out_rate, cfg, &plan, &coef_, err)) return false;
+    up_ = plan.up;
+    down_ = plan.down;
+    phases_ = plan.phases;
+    exact_ = plan.exact;
+    taps_ = cfg.taps;
+    ok_ = true;
+    return true;
+}
+
+void AdxRateConverter::reset() {
+    hist_.clear();
+    hist_base_ = 0;
+    in_total_ = 0;
+    n_gen_ = 0;
+    delivered_ = 0;
+    flushing_ = false;
+    done_ = false;
+}
+
+size_t AdxRateConverter::output_frames(size_t in_frames) const {
+    if (in_rate_ == 0 || out_rate_ == 0) return 0;
+    return adx_resample_out_frames(in_frames, in_rate_, out_rate_);
+}
+
+size_t AdxRateConverter::process(const int16_t* in, size_t in_frames, int16_t* out,
+                                 size_t max_out) {
+    if (!ok_ || done_) return 0;
+    if (in_frames != 0) {
+        if (in == nullptr) return 0;
+        const size_t old = hist_.size();
+        hist_.resize(old + in_frames * channels_);
+        std::memcpy(hist_.data() + old, in, in_frames * channels_ * sizeof(int16_t));
+        in_total_ += in_frames;
+    }
+    return generate(out, max_out, false);
+}
+
+size_t AdxRateConverter::flush(int16_t* out, size_t max_out) {
+    if (!ok_) return 0;
+    flushing_ = true;
+    const size_t w = generate(out, max_out, true);
+    if (n_gen_ >= output_frames(in_total_)) done_ = true;
+    return w;
+}
+
+size_t AdxRateConverter::generate(int16_t* out, size_t max_out, bool flush) {
+    const size_t limit = output_frames(in_total_);
+    size_t written = 0;
+    if (out == nullptr || max_out == 0) return 0;
+
+    if (bypass_) {   // same rate: the timeline is the output, no filter
+        const size_t have = in_total_ - delivered_;
+        const size_t take = std::min(have, max_out);
+        if (take != 0 && out != nullptr) {
+            std::memcpy(out, hist_.data() + (delivered_ - hist_base_) * channels_,
+                        take * channels_ * sizeof(int16_t));
+        }
+        delivered_ += take;
+        n_gen_ = delivered_;
+        const size_t keep_from = delivered_ - hist_base_;
+        if (keep_from != 0) {
+            hist_.erase(hist_.begin(), hist_.begin() + (std::ptrdiff_t)(keep_from * channels_));
+            hist_base_ = delivered_;
+        }
+        if (flushing_ && delivered_ >= in_total_) done_ = true;
+        return take;
+    }
+
+    const int64_t half = (int64_t)(taps_ / 2);
+    while (n_gen_ < limit && written < max_out) {
+        const uint64_t t = (uint64_t)n_gen_ * down_;
+        const size_t q = (size_t)(t / up_);
+        const uint32_t rem = (uint32_t)(t % up_);
+        const uint32_t ph = exact_ ? rem : (uint32_t)(((uint64_t)rem * phases_) / up_);
+        const int64_t hi = (int64_t)q + half - 1;
+        if (!flush && hi >= (int64_t)in_total_) break;   // wait for more input
+        const int32_t* row = coef_.data() + (size_t)ph * taps_;
+        const int64_t base = (int64_t)q - half;
+        for (uint32_t ch = 0; ch < channels_; ++ch) {
+            int64_t acc = 0;
+            for (uint32_t k = 0; k < taps_; ++k) {
+                const int64_t idx = base + (int64_t)k;
+                if (idx < (int64_t)hist_base_ || idx >= (int64_t)in_total_) continue;
+                const size_t off = (size_t)(idx - (int64_t)hist_base_) * channels_ + ch;
+                acc += (int64_t)hist_[off] * row[k];
+            }
+            out[written * channels_ + ch] = clamp_s16((acc + kRateHalf) >> kRateShift);
+        }
+        ++n_gen_;
+        ++written;
+    }
+
+    // Drop history the filter can no longer reach.
+    if (n_gen_ < limit) {
+        const size_t q_next = (size_t)(((uint64_t)n_gen_ * down_) / up_);
+        if (q_next > (size_t)half) {
+            const size_t keep = q_next - (size_t)half;
+            if (keep > hist_base_) {
+                size_t drop = keep - hist_base_;
+                if (drop > hist_.size() / channels_) drop = hist_.size() / channels_;
+                hist_.erase(hist_.begin(), hist_.begin() + (std::ptrdiff_t)(drop * channels_));
+                hist_base_ += drop;
+            }
+        }
+    } else {
+        hist_.clear();
+        hist_base_ = in_total_;
+    }
+    return written;
+}
+
+bool AdxPlayback::open(const uint8_t* data, size_t size, AdxFlavor flavor, const AdxKey& key,
+                       const AdxPlaybackConfig& cfg, std::string* err) {
+    ended_ = false;
+    flushed_ = false;
+    ob_pos_ = ob_len_ = 0;
+    AdxStreamConfig sc;
+    sc.loops = cfg.loops;
+    sc.tail = cfg.tail;
+    sc.state = cfg.state;
+    if (!stream_.open(data, size, flavor, key, sc, err)) return false;
+    channels_ = stream_.header().channels;
+    cfg_ = cfg;
+    if (!conv_.init(stream_.header().sample_rate, cfg.out_rate, channels_, cfg.resample, err)) {
+        return false;
+    }
+    ib_.assign((size_t)1024 * channels_, 0);
+    // Output held per bounce: one input block worth of output plus the filter tail.
+    size_t ob_frames = 1024;
+    if (stream_.header().sample_rate != 0) {
+        ob_frames = (size_t)((double)1024 * (double)cfg.out_rate /
+                             (double)stream_.header().sample_rate) + 128;
+    }
+    ob_.assign(ob_frames * channels_, 0);
+    return true;
+}
+
+size_t AdxPlayback::read(int16_t* out, size_t frames) {
+    if (out == nullptr || frames == 0 || channels_ == 0) return 0;
+    size_t written = 0;
+    while (written < frames) {
+        if (ob_pos_ < ob_len_) {
+            const size_t take = std::min(frames - written, ob_len_ - ob_pos_);
+            std::memcpy(out + written * channels_, ob_.data() + ob_pos_ * channels_,
+                        take * channels_ * sizeof(int16_t));
+            ob_pos_ += take;
+            written += take;
+            continue;
+        }
+        if (flushed_) {
+            ended_ = true;
+            break;
+        }
+        const size_t got = stream_.read(ib_.data(), 1024);
+        if (got == 0) {
+            const size_t w = conv_.flush(ob_.data(), ob_.size() / channels_);
+            ob_pos_ = 0;
+            ob_len_ = w;
+            flushed_ = true;
+            if (w == 0) {
+                ended_ = true;
+                break;
+            }
+            continue;
+        }
+        ob_pos_ = 0;
+        ob_len_ = conv_.process(ib_.data(), got, ob_.data(), ob_.size() / channels_);
+    }
+    return written;
 }
 
 bool adx_write_wav(const char* path, const int16_t* pcm, size_t samples_per_channel,

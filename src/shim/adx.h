@@ -249,6 +249,137 @@ private:
 bool adx_decode_file(const char* path, AdxFlavor flavor, const AdxKey& key,
                      AdxHeader* header, std::vector<int16_t>* pcm, std::string* err);
 
+// ── Phase 9d: sample-rate conversion to the SPU2 rate ────────────────────────
+// The PS2 SPU2 only plays 48 kHz (59.94 Hz NTSC basis); 8 of the 367 God Hand
+// streams are 24 kHz. Mixing them into SPU2 as-is would play both at double
+// speed and halve the timeline, so the port needs a real converter, not a
+// nearest-sample pick.
+//
+// Implementation contract (all measured, see docs/PROJECT.md Phase 9d):
+//   * windowed-sinc, Kaiser window, 128 taps per phase, Q23 coefficients
+//   * cutoff scales with min(1, out/in) so decimation cannot alias
+//   * phase accumulator is integer (fixed point) so 24000->48000 is exactly 2
+//     output samples per input sample with zero drift over 10^9 samples
+//   * output length is ceil(in * out_rate / in_rate) and is exactly reproducible
+struct AdxResampleConfig {
+    uint32_t taps           = 128;   // FIR taps per phase (even, >= 8)
+    double   kaiser_beta    = 8.6;   // stopband attenuation ~ 90 dB
+    double   cutoff         = 0.97;  // passband edge as a fraction of the lower Nyquist
+    uint32_t phase_bits     = 12;    // sub-sample resolution: 4096 phases + half
+    bool     clamp          = true;  // clamp to int16 (quantisation of overshoot)
+};
+
+// Resamples interleaved s16 in place-of-copy. `in` holds `in_frames` frames of
+// `channels` interleaved samples; `out` receives interleaved s16 at `out_rate`.
+// Returns false only on bad arguments (zero rate, zero channels, null buffers).
+bool adx_resample_s16(const int16_t* in, size_t in_frames, uint32_t in_rate,
+                      uint32_t channels, uint32_t out_rate,
+                      const AdxResampleConfig& cfg, std::vector<int16_t>* out,
+                      std::string* err);
+
+// Number of output frames adx_resample_s16() will emit for `in_frames`, i.e.
+// ceil(in_frames * out_rate / in_rate). Same formula the implementation uses,
+// so callers can size buffers without guessing.
+size_t adx_resample_out_frames(size_t in_frames, uint32_t in_rate, uint32_t out_rate);
+
+// Streaming converter for the mixer: push interleaved frames at the stream rate,
+// pull frames at `out_rate`. Same coefficients and same integer phase arithmetic
+// as adx_resample_s16(), so one-shot and block-streamed output are byte-identical
+// for every block size (gate: --resample-check).
+//
+// LOOPING (measured, Phase 9d): AdxStream::read() already emits playback order —
+// the loop jump is inside the stream — so resampling a looping timeline is
+// byte-identical to resampling one whole render_loop() buffer (verified on
+// adx_m66_0004 at 48->96 kHz: 52.439.352 frames, 0 mismatches). Callers do NOT
+// need to cut reads at samples_until_event(). What does corrupt output is a
+// discontinuity the caller introduces itself (seek, retrigger, restart from
+// loop_start): the FIR history then holds audio from before the seek, and the
+// first taps/2 frames after it are wrong. Call reset() on every explicit jump.
+class AdxRateConverter {
+public:
+    bool init(uint32_t in_rate, uint32_t out_rate, uint32_t channels,
+              const AdxResampleConfig& cfg, std::string* err);
+
+    bool ok() const { return ok_; }
+    bool bypass() const { return bypass_; }
+    uint32_t in_rate() const { return in_rate_; }
+    uint32_t out_rate() const { return out_rate_; }
+    uint32_t channels() const { return channels_; }
+
+    // Output frames that the whole input (this call included) will produce.
+    size_t output_frames(size_t in_frames) const;
+
+    // Pushes `in_frames`, writes at most `max_out` interleaved frames to `out`.
+    // Returns frames written. Caller must size `out` for output_frames(total_in)
+    // minus what was already written; frames beyond max_out stay queued in the
+    // input history and come out on the next call.
+    size_t process(const int16_t* in, size_t in_frames, int16_t* out, size_t max_out);
+
+    // Zero-pads the tail and emits the remaining output frames. Idempotent.
+    size_t flush(int16_t* out, size_t max_out);
+
+    bool finished() const { return done_; }
+    void reset();
+
+private:
+    size_t generate(int16_t* out, size_t max_out, bool flush);
+
+    uint32_t in_rate_ = 0, out_rate_ = 0, channels_ = 1;
+    uint32_t up_ = 1, down_ = 1, phases_ = 1, taps_ = 0;
+    bool exact_ = true, bypass_ = false, ok_ = false, flushing_ = false, done_ = false;
+    std::vector<int32_t> coef_;
+    std::vector<int16_t> hist_;   // interleaved input frames, hist_[0] == frame hist_base_
+    size_t hist_base_ = 0;
+    size_t in_total_ = 0;         // input frames pushed so far
+    size_t n_gen_ = 0;            // output frames produced so far
+    size_t delivered_ = 0;        // frames handed to the caller (bypass bookkeeping)
+};
+
+// What the mixer wants: one pull API, already at the SPU2 rate, loop timeline
+// included. AdxPlayback = AdxStream (decode + loop) -> AdxRateConverter (rate),
+// with the block bounce hidden. `data` must outlive the object.
+struct AdxPlaybackConfig {
+    int32_t          loops    = 0;                        // extra loop-body plays
+    bool             tail     = true;                     // play loop_end..end once
+    AdxLoopState     state    = AdxLoopState::Linear;     // history at the jump
+    uint32_t         out_rate = 48000;                    // SPU2 rate
+    AdxResampleConfig resample;
+};
+
+class AdxPlayback {
+public:
+    bool open(const uint8_t* data, size_t size, AdxFlavor flavor, const AdxKey& key,
+              const AdxPlaybackConfig& cfg, std::string* err);
+
+    // Interleaved s16 at cfg.out_rate. Returns frames written; 0 means the
+    // timeline ended. Byte-identical to resampling one render_loop() buffer.
+    size_t read(int16_t* out, size_t frames);
+
+    bool ended() const { return ended_; }
+    const AdxHeader& header() const { return stream_.header(); }
+    uint32_t channels() const { return channels_; }
+    uint32_t out_rate() const { return cfg_.out_rate; }
+    size_t timeline_frames() const { return conv_.output_frames(stream_.timeline_samples()); }
+    bool bypass() const { return conv_.bypass(); }
+
+private:
+    AdxStream        stream_;
+    AdxRateConverter conv_;
+    AdxPlaybackConfig cfg_;
+    uint32_t channels_ = 0;
+    std::vector<int16_t> ib_, ob_;
+    size_t ob_pos_ = 0, ob_len_ = 0;
+    bool ended_ = false, flushed_ = false;
+};
+
+// Convenience for the runtime path: decode `path` (CRI flavour, trimmed to the
+// header sample_count) and resample to `out_rate` if needed. If the stream is
+// already at `out_rate` the PCM is copied, not filtered.
+bool adx_decode_file_resampled(const char* path, AdxFlavor flavor, const AdxKey& key,
+                               uint32_t out_rate, const AdxResampleConfig& cfg,
+                               AdxHeader* header, std::vector<int16_t>* pcm,
+                               size_t* out_frames, std::string* err);
+
 }  // namespace audio
 }  // namespace gh
 
