@@ -133,3 +133,7 @@ target_include_directories(gh_adx PUBLIC src/shim)
 
 add_executable(adx_test src/shim/adx_test.cpp)
 target_link_libraries(adx_test PRIVATE gh_adx)
+
+# Memory proof for AdxStream: peak RSS vs the materialised timeline size.
+add_executable(adx_stream_rss tools/adx_stream_rss.cpp)
+target_link_libraries(adx_stream_rss PRIVATE gh_adx)

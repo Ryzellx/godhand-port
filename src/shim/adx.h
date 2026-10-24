@@ -103,6 +103,94 @@ struct AdxLoopRender {
 bool adx_write_wav(const char* path, const int16_t* pcm, size_t samples_per_channel,
                    uint32_t channels, uint32_t sample_rate);
 
+// Configuration for AdxStream. Same timeline as AdxLoopRender: intro, N extra
+// loop bodies, optional tail. `block_hint` is informational only — read() is
+// block-size independent down to one frame.
+struct AdxStreamConfig {
+    int32_t      loops = 0;                       // extra loop-body plays
+    bool         tail  = true;                    // play loop_end..sample_count once loops are done
+    AdxLoopState state = AdxLoopState::Linear;    // history behaviour at the jump
+};
+
+// Runtime-facing pull decoder: emits the loop timeline in blocks of arbitrary
+// size without ever materialising the whole PCM. Constant memory (one 32-sample
+// frame plus the stream bytes the caller owns), O(1) jump, byte-identical to
+// AdxDecoder::render_loop() with the same AdxStreamConfig for every block size.
+//
+// The decrypted-payload copy AdxDecoder does is avoided here: the type-8 keystream
+// is advanced one word per 18-byte block and the state at loop_start is snapshotted
+// on the first pass, so a jump can restore the cipher state too.
+class AdxStream {
+public:
+    // `data` must stay alive and unchanged while the stream is used; the class does
+    // not copy it. Parses the header, validates frame layout, prepares the loop
+    // restore point. Returns false with `err` set if the stream is unusable.
+    bool open(const uint8_t* data, size_t size, AdxFlavor flavor, const AdxKey& key,
+              const AdxStreamConfig& cfg, std::string* err);
+
+    // Copies at most `frames` interleaved frames to `out`; returns frames written.
+    // 0 means the timeline ended (or read() was called after it ended).
+    size_t read(int16_t* out, size_t frames);
+
+    bool ended() const { return done_; }
+    const AdxHeader& header() const { return header_; }
+    AdxFlavor flavor() const { return flavor_; }
+    // Samples per channel left before the next event (loop jump or end of timeline).
+    size_t samples_until_event() const;
+    // Total timeline length in samples per channel that read() will produce.
+    size_t timeline_samples() const;
+
+private:
+    struct Hist {
+        int32_t h1[kAdxMaxChannels] = {};
+        int32_t h2[kAdxMaxChannels] = {};
+    };
+
+    Hist history_at_cursor() const;
+    bool load_frame(size_t idx);
+    void jump_to_loop_start();
+    void advance_segment();
+    void decode_block(const uint8_t* src, uint16_t key_word, int32_t* h1, int32_t* h2,
+                      int16_t* out, size_t stride, uint32_t hist_at = kAdxFrameSamples,
+                      int32_t* hist_h1 = nullptr, int32_t* hist_h2 = nullptr) const;
+
+    const uint8_t* data_ = nullptr;
+    size_t size_ = 0;
+    AdxHeader header_;
+    AdxFlavor flavor_ = AdxFlavor::Cri;
+    AdxKey key_;
+    int32_t coef_c1_ = 0;   // header-derived predictor (same for all channels)
+    int32_t coef_c2_ = 0;
+    AdxStreamConfig cfg_;
+
+    size_t channels_ = 0;
+    size_t frame_bytes_ = 0;
+    size_t blocks_ = 0;
+    size_t total_ = 0;
+    size_t loop_start_ = 0;
+    size_t loop_end_ = 0;
+    bool   loopable_ = false;
+
+    // timeline cursor
+    size_t pos_ = 0;        // sample position inside the current pass
+    size_t limit_ = 0;      // end of the current segment
+    size_t frame_idx_ = 0;  // frame currently buffered in frame_buf_
+    bool   have_frame_ = false;
+    bool   done_ = false;
+    int32_t played_ = 0;
+
+    Hist   run_;     // running predictor history
+    Hist   entry_;   // history entering the buffered frame
+    Hist   ls_entry_;
+    uint16_t ks_ = 0;
+    uint16_t ls_ks_ = 0;
+    bool   ls_valid_ = false;
+    size_t ls_frame_ = 0;
+
+    std::vector<int16_t> frame_buf_;
+    std::vector<uint8_t> block_;
+};
+
 // Copies `size` bytes of ADX into `out` with the type-8/9 keystream removed from
 // every frame's scale word (13-bit scale kept, filter bits cleared) and the
 // version word rewritten to 0x0400, i.e. a plain ADX ffmpeg/VGAudio can decode.

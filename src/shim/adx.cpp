@@ -185,8 +185,10 @@ void decode_frame(const uint8_t* frame, uint8_t encoding, AdxFlavor flavor,
                   const Lpc& header_coef, int32_t* h1, int32_t* h2,
                   int16_t* out, size_t stride,
                   uint32_t hist_at = kAdxFrameSamples, int32_t* hist_h1 = nullptr,
-                  int32_t* hist_h2 = nullptr) {
-    const uint16_t word = rd16(frame);
+                  int32_t* hist_h2 = nullptr, uint16_t key_word = 0) {
+    // key_word is the type-8/9 keystream word for this 18-byte block; AdxDecoder
+    // pre-decrypts its copy, AdxStream passes the word live to avoid the copy.
+    const uint16_t word = (uint16_t)(rd16(frame) ^ key_word);
     int32_t scale;
     Lpc coef = header_coef;
 
@@ -558,6 +560,222 @@ bool AdxDecoder::render_loop(const AdxLoopRender& opt, std::vector<int16_t>* out
         }
     }
     return true;
+}
+
+namespace {
+
+// Advances one type-8 keystream step and returns the word for the current block.
+inline uint16_t ks_take(uint16_t* state, const AdxKey& key) {
+    const uint16_t w = *state;
+    *state = (uint16_t)((*state * key.mult + key.add) & 0x7fff);
+    return w;
+}
+
+}  // namespace
+
+void AdxStream::decode_block(const uint8_t* src, uint16_t key_word, int32_t* h1, int32_t* h2,
+                             int16_t* out, size_t stride, uint32_t hist_at, int32_t* hist_h1,
+                             int32_t* hist_h2) const {
+    const Lpc coef{coef_c1_, coef_c2_};
+    decode_frame(src, header_.encoding, flavor_, coef, h1, h2, out, stride, hist_at, hist_h1,
+                 hist_h2, key_word);
+}
+
+bool AdxStream::open(const uint8_t* data, size_t size, AdxFlavor flavor, const AdxKey& key,
+                     const AdxStreamConfig& cfg, std::string* err) {
+    auto fail = [&](const char* msg) {
+        if (err) *err = msg;
+        return false;
+    };
+    data_ = data;
+    size_ = size;
+    flavor_ = flavor;
+    cfg_ = cfg;
+    done_ = false;
+    played_ = 0;
+    pos_ = 0;
+    have_frame_ = false;
+    ls_valid_ = false;
+
+    if (data == nullptr || size == 0) return fail("null stream");
+    AdxHeader h;
+    if (!adx_parse_header(data, size, &h, err)) return false;
+    if (h.encrypted) {
+        if (!key.valid) return fail("encrypted stream but no usable ADX key");
+        key_ = key;
+    } else {
+        key_ = AdxKey{};
+    }
+    header_ = h;
+    channels_ = h.channels;
+    frame_bytes_ = (size_t)h.frame_size * channels_;
+    if (h.data_offset >= size || frame_bytes_ == 0) return fail("no frame data");
+    blocks_ = (size - h.data_offset) / frame_bytes_;
+    if (blocks_ == 0) return fail("no complete frame");
+    const size_t decoded = blocks_ * kAdxFrameSamples;
+    total_ = h.sample_count ? (h.sample_count < decoded ? h.sample_count : decoded) : decoded;
+    if (total_ == 0) return fail("zero-length stream");
+
+    const Lpc coef = (flavor_ == AdxFlavor::Cri) ? coefs_cri(h.cutoff_hz, h.sample_rate)
+                                                 : coefs_ffmpeg(h.cutoff_hz, h.sample_rate);
+    coef_c1_ = coef.c1;
+    coef_c2_ = coef.c2;
+
+    const int64_t ls = h.loop_start_sample;
+    const int64_t le = h.loop_end_sample;
+    loopable_ = h.loop && ls >= 0 && le > ls && (uint64_t)le <= total_;
+    loop_start_ = loopable_ ? (size_t)ls : 0;
+    loop_end_ = loopable_ ? (size_t)le : total_;
+    ls_frame_ = loop_start_ / kAdxFrameSamples;
+
+    run_ = Hist{};
+    if (flavor_ == AdxFlavor::Cri) {
+        for (size_t c = 0; c < channels_; ++c) {
+            run_.h1[c] = h.history[c][0];
+            run_.h2[c] = h.history[c][1];
+        }
+    }
+    ks_ = header_.encrypted ? key_.start : 0;
+    ls_ks_ = ks_;
+    frame_buf_.assign((size_t)kAdxFrameSamples * channels_, 0);
+    limit_ = loopable_ ? loop_end_ : total_;
+    frame_idx_ = 0;
+    return true;
+}
+
+bool AdxStream::load_frame(size_t idx) {
+    if (idx >= blocks_ || data_ == nullptr) return false;
+    // First pass: remember the cipher + predictor state entering frame(loop_start).
+    if (loopable_ && played_ == 0 && !ls_valid_ && idx == ls_frame_) {
+        ls_entry_ = run_;
+        ls_ks_ = ks_;
+        ls_valid_ = true;
+    }
+    entry_ = run_;
+    for (size_t c = 0; c < channels_; ++c) {
+        const uint8_t* src = data_ + header_.data_offset + idx * frame_bytes_ + c * header_.frame_size;
+        const uint16_t kw = header_.encrypted ? ks_take(&ks_, key_) : 0;
+        decode_block(src, kw, &run_.h1[c], &run_.h2[c], frame_buf_.data() + c, channels_);
+    }
+    frame_idx_ = idx;
+    have_frame_ = true;
+    return true;
+}
+
+AdxStream::Hist AdxStream::history_at_cursor() const {
+    // Predictor state at pos_, reconstructed from the buffered frame. `run_` is only
+    // the state at the *end* of that frame, so a loop that lands mid-frame (God Hand
+    // has loop_end = 192624.375 frames) needs the last two decoded samples instead.
+    const size_t off = pos_ % kAdxFrameSamples;
+    Hist h;
+    if (off == 0) return run_;
+    for (size_t c = 0; c < channels_; ++c) {
+        h.h1[c] = frame_buf_[(off - 1) * channels_ + c];
+        h.h2[c] = (off >= 2) ? frame_buf_[(off - 2) * channels_ + c] : entry_.h1[c];
+    }
+    return h;
+}
+
+void AdxStream::jump_to_loop_start() {
+    const size_t off = loop_start_ % kAdxFrameSamples;
+    Hist base;
+    switch (cfg_.state) {
+        case AdxLoopState::Carry: base = history_at_cursor(); break;
+        case AdxLoopState::ResetHeader:
+            base = Hist{};
+            if (flavor_ == AdxFlavor::Cri) {
+                for (size_t c = 0; c < channels_; ++c) {
+                    base.h1[c] = header_.history[c][0];
+                    base.h2[c] = header_.history[c][1];
+                }
+            }
+            break;
+        case AdxLoopState::Linear: base = ls_entry_; break;
+    }
+    run_ = base;
+    pos_ = loop_start_;
+    limit_ = loop_end_;
+    have_frame_ = false;
+    frame_idx_ = ls_frame_;
+    // Rewind the cipher to the loop block. load_frame() will re-decrypt the frame.
+    ks_ = ls_ks_;
+
+    if (off != 0) {
+        // loop_start sits inside a frame (no shipped God Hand stream does): rebuild the
+        // predictor state at the jump sample by decoding the frame from `base`. The frame
+        // itself is decoded again from that state when read() pulls it, which is exactly
+        // what AdxDecoder::render_loop() emits.
+        Hist at = base;
+        uint16_t ks = ls_ks_;
+        for (size_t c = 0; c < channels_; ++c) {
+            const uint8_t* src = data_ + header_.data_offset + ls_frame_ * frame_bytes_ + c * header_.frame_size;
+            const uint16_t kw = header_.encrypted ? ks_take(&ks, key_) : 0;
+            int32_t h1 = base.h1[c], h2 = base.h2[c];
+            decode_block(src, kw, &h1, &h2, frame_buf_.data() + c, channels_, (uint32_t)off,
+                         &at.h1[c], &at.h2[c]);
+        }
+        run_ = at;
+        ks_ = ls_ks_;
+    }
+}
+
+void AdxStream::advance_segment() {
+    if (!loopable_) {
+        done_ = true;
+        return;
+    }
+    if (pos_ == loop_end_) {
+        if (played_ < cfg_.loops) {
+            ++played_;
+            jump_to_loop_start();
+            return;
+        }
+        if (cfg_.tail && loop_end_ < total_) {
+            limit_ = total_;
+            return;
+        }
+        done_ = true;
+        return;
+    }
+    if (pos_ >= total_) done_ = true;
+}
+
+size_t AdxStream::timeline_samples() const {
+    if (!loopable_) return total_;
+    size_t n = loop_end_;
+    const int32_t l = cfg_.loops < 0 ? 0 : cfg_.loops;
+    n += (size_t)l * (loop_end_ - loop_start_);
+    if (cfg_.tail && loop_end_ < total_) n += total_ - loop_end_;
+    return n;
+}
+
+size_t AdxStream::samples_until_event() const {
+    if (done_) return 0;
+    return limit_ > pos_ ? limit_ - pos_ : 0;
+}
+
+size_t AdxStream::read(int16_t* out, size_t frames) {
+    if (out == nullptr || frames == 0 || done_) return 0;
+    size_t produced = 0;
+    while (produced < frames && !done_) {
+        const size_t want_frame = pos_ / kAdxFrameSamples;
+        if (!have_frame_ || frame_idx_ != want_frame) {
+            if (!load_frame(want_frame)) {
+                done_ = true;
+                break;
+            }
+        }
+        const size_t off = pos_ % kAdxFrameSamples;
+        size_t take = (size_t)kAdxFrameSamples - off;
+        if (take > limit_ - pos_) take = limit_ - pos_;
+        if (take > frames - produced) take = frames - produced;
+        std::memcpy(out + produced * channels_, frame_buf_.data() + off * channels_,
+                    take * channels_ * sizeof(int16_t));
+        produced += take;
+        pos_ += take;
+        if (pos_ == limit_) advance_segment();
+    }
+    return produced;
 }
 
 bool adx_write_wav(const char* path, const int16_t* pcm, size_t samples_per_channel,

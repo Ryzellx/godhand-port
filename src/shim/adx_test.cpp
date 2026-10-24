@@ -34,6 +34,8 @@ using gh::audio::AdxFlavor;
 using gh::audio::AdxHeader;
 using gh::audio::AdxKey;
 using gh::audio::AdxLoopRender;
+using gh::audio::AdxStream;
+using gh::audio::AdxStreamConfig;
 using gh::audio::AdxLoopState;
 
 struct Options {
@@ -50,6 +52,7 @@ struct Options {
     std::string loop_state = "auto";  // carry | reset | linear | auto
     int loops = 1;                 // extra loop-body plays (vgmstream is run with -l loops+1)
     std::string wav_dir;           // optional: dump trimmed PCM to <dir>/<name>.wav
+    bool stream_check = false;     // AdxStream (pull API) must equal render_loop byte-exact
 };
 
 struct Compare {
@@ -302,14 +305,68 @@ struct FileResult {
     int loop_state_used = 0;      // 0 carry, 1 reset, 2 linear
     size_t pcm_samples = 0;
     size_t trimmed_samples = 0;
+    bool   stream_checked = false;
+    bool   stream_exact = false;
+    size_t stream_checks = 0;   // state x block-size combinations that matched
+    size_t stream_states = 0;   // loop states exercised
 };
+
+// Pulls the whole timeline through AdxStream in blocks of `block` frames and demands
+// byte equality with the reference render. This is what proves the runtime pull API
+// (arbitrary block sizes, O(1) memory, one-frame cache) is the same audio as the
+// whole-buffer renderer, including the loop jump and the predictor state at it.
+bool stream_matches(const std::vector<uint8_t>& src, const AdxKey& key, const AdxLoopRender& lr,
+                    size_t block, const std::vector<int16_t>& ref, size_t channels,
+                    std::string* why) {
+    AdxStreamConfig cfg;
+    cfg.loops = lr.loops;
+    cfg.tail = lr.tail;
+    cfg.state = lr.state;
+    AdxStream st;
+    std::string err;
+    if (!st.open(src.data(), src.size(), AdxFlavor::Cri, key, cfg, &err)) {
+        *why = "open: " + err;
+        return false;
+    }
+    if (st.timeline_samples() != ref.size() / channels) {
+        *why = "timeline " + std::to_string(st.timeline_samples()) + " != render " +
+               std::to_string(ref.size() / channels);
+        return false;
+    }
+    std::vector<int16_t> got;
+    got.reserve(ref.size());
+    std::vector<int16_t> buf(block * channels);
+    while (!st.ended()) {
+        const size_t n = st.read(buf.data(), block);
+        if (n == 0) break;
+        got.insert(got.end(), buf.begin(), buf.begin() + (ptrdiff_t)(n * channels));
+    }
+    if (st.read(buf.data(), block) != 0) {
+        *why = "read() returned data after the timeline ended";
+        return false;
+    }
+    if (got.size() != ref.size()) {
+        *why = "produced " + std::to_string(got.size() / channels) + " frames, render has " +
+               std::to_string(ref.size() / channels);
+        return false;
+    }
+    if (std::memcmp(got.data(), ref.data(), ref.size() * sizeof(int16_t)) != 0) {
+        size_t i = 0;
+        while (i < got.size() && got[i] == ref[i]) ++i;
+        *why = "block " + std::to_string(block) + ": first diff at interleaved sample " +
+               std::to_string(i);
+        return false;
+    }
+    return true;
+}
 
 // Gates:
 //  * ffmpeg byte-exactness in the libavcodec flavour -> our ADPCM core is right.
 //  * vgmstream byte-exactness in the CRI flavour on the ORIGINAL encrypted file ->
 //    the type-8 keystream, the CRI arithmetic and the sample_count trim are right.
 //  * loop points and trimmed length must equal vgmstream's metadata.
-FileResult check_file(const Options& o, const AdxKey& key, const std::string& path) {
+FileResult check_file(const Options& o, const AdxKey& key, const std::string& path,
+                       size_t index) {
     FileResult r;
     std::string err;
     const std::string name = stem_of(path);
@@ -524,6 +581,46 @@ FileResult check_file(const Options& o, const AdxKey& key, const std::string& pa
         }
     }
 
+    if (o.stream_check) {
+        struct Cand { const char* name; AdxLoopState st; } kStreamCands[3] = {
+            {"carry", AdxLoopState::Carry}, {"reset", AdxLoopState::ResetHeader},
+            {"linear", AdxLoopState::Linear}};
+        // 1- and 7-frame pulls hammer the per-frame cache and the mid-frame paths; they
+        // are slow, so only the first few files get them. 33 and 4096 are the shapes a
+        // runtime mixer actually asks for (non-divisor of 32, and a big block).
+        const size_t blocks[4] = {33, 4096, 1, 7};
+        const size_t nblocks = (index < 8) ? 4 : 2;
+        bool ok_here = true;
+        std::string why;
+        r.stream_checked = true;
+        for (const Cand& cand : kStreamCands) {
+            if (o.loop_state != "auto" && o.loop_state != cand.name) continue;
+            AdxLoopRender lr;
+            lr.loops = o.loops;
+            lr.tail = true;
+            lr.state = cand.st;
+            std::vector<int16_t> ref;
+            std::string lerr;
+            if (!dec.render_loop(lr, &ref, &lerr)) {
+                ok_here = false;
+                why = std::string("render_loop: ") + lerr;
+                break;
+            }
+            ++r.stream_states;
+            for (size_t b = 0; b < nblocks; ++b) {
+                if (!stream_matches(src, key, lr, blocks[b], ref, disk.channels, &why)) {
+                    ok_here = false;
+                    break;
+                }
+                ++r.stream_checks;
+            }
+            if (!ok_here) break;
+        }
+        r.stream_exact = ok_here;
+        std::printf("STREAM %-23s states=%zu checks=%zu %s%s\n", name.c_str(), r.stream_states,
+                    r.stream_checks, ok_here ? "PASS" : "FAIL", ok_here ? "" : (" " + why).c_str());
+    }
+
     if (!o.wav_dir.empty()) {
         const std::string wav = o.wav_dir + "/" + name + ".wav";
         if (!gh::audio::adx_write_wav(wav.c_str(), cri.data(), cri.size() / disk.channels, disk.channels,
@@ -619,6 +716,8 @@ void usage() {
         "  --loop-state <s>    carry|reset|linear|auto (default auto = report which matches)\n"
         "  --loops <n>         extra loop-body plays, default 1 (vgmstream gets -l n+1)\n"
         "  --wav <dir>         dump trimmed PCM (and one looped pass) as 16-bit WAV\n"
+        "  --stream-check      pull the loop timeline through AdxStream at several block sizes\n"
+        "                      and require byte equality with render_loop (same --loop-state)\n"
         "  --no-ffmpeg         decode + vgmstream self-check only\n");
 }
 
@@ -643,6 +742,7 @@ int main(int argc, char** argv) {
         else if (a == "--key") o.key = next("--key");
         else if (a == "--synth") o.synth = true;
         else if (a == "--no-ffmpeg") o.skip_ffmpeg = true;
+        else if (a == "--stream-check") o.stream_check = true;
         else if (a == "--loop-render") o.loop_render = true;
         else if (a == "--loop-state") o.loop_state = next("--loop-state");
         else if (a == "--loops") o.loops = (int)std::strtol(next("--loops").c_str(), nullptr, 10);
@@ -693,10 +793,12 @@ int main(int argc, char** argv) {
     size_t loops = 0, loop_ok_checked = 0;
     size_t lr_checked = 0, lr_exact = 0, lr_carry = 0, lr_reset = 0, lr_linear = 0;
     size_t lr_samples = 0;
+    size_t st_checked = 0, st_exact = 0, st_checks = 0;
     double snr_ff_min = 1e9, snr_vgm_min = 1e9;
     size_t total_samples = 0;
-    for (const std::string& f : o.files) {
-        const FileResult r = check_file(o, key, f);
+    for (size_t fi = 0; fi < o.files.size(); ++fi) {
+        const std::string& f = o.files[fi];
+        const FileResult r = check_file(o, key, f, fi);
         if (r.pass) ++pass; else ++fail;
         if (r.ffmpeg_exact) ++ffmpeg_exact;
         if (r.vgm_checked) { ++vgm_checked; if (r.vgm_exact) ++vgm_exact; }
@@ -711,6 +813,11 @@ int main(int argc, char** argv) {
             if (r.loop_state_mask & 2) ++lr_reset;
             if (r.loop_state_mask & 4) ++lr_linear;
             lr_samples += r.loop_samples;
+        }
+        if (r.stream_checked) {
+            ++st_checked;
+            if (r.stream_exact) ++st_exact;
+            st_checks += r.stream_checks;
         }
     }
 
@@ -728,6 +835,10 @@ int main(int argc, char** argv) {
         std::printf("SUMMARY looprender_checked=%zu looprender_exact=%zu state_carry=%zu "
                     "state_reset=%zu state_linear=%zu loop_pcm_samples_total=%zu loops=%d\n",
                     lr_checked, lr_exact, lr_carry, lr_reset, lr_linear, lr_samples, o.loops);
+    if (o.stream_check)
+        std::printf("SUMMARY stream_checked=%zu stream_exact=%zu stream_block_matches=%zu "
+                    "loop_render_samples=%zu\n",
+                    st_checked, st_exact, st_checks, lr_samples);
     if (o.synth) std::printf("SUMMARY synth_failures=%d\n", synth_fail);
-    return (fail == 0 && synth_fail == 0) ? 0 : 1;
+    return (fail == 0 && st_checked == st_exact && synth_fail == 0) ? 0 : 1;
 }

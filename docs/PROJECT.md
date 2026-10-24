@@ -627,5 +627,82 @@ di-gate terpisah di bawah):
 - Resampling 24 kHz → laju output game belum ada (8 stream).
 - Audio non-ADX belum disentuh: MPEG/SND di AFS dan audio dalam SFD/PSS.
 - Encoding type 2/4 hanya terbukti di vektor sintetis (title ini 100% type 3).
-- `render_loop` mengalokasikan output penuh (loop 2x file terbesar = ~140 MB); untuk streaming
-  runtime perlu versi ring-buffer per frame, bukan vektor penuh.
+- `render_loop` mengalokasikan output penuh (loop 2x file terbesar = 17.753.672 frame x 2 kanal
+  x 2 B = 71 MB, bukan ~140 MB seperti tulisan sebelumnya); untuk streaming runtime perlu versi
+  ring-buffer per frame, bukan vektor penuh. → **ditutup di Phase 9c**. 
+
+### LOG 24 Okt 2026 — Phase 9c: `AdxStream`, decoder tarik untuk runtime (blok arbitrer, memori konstan)
+
+**1) Masalah**
+
+Phase 9b mematerialkan seluruh timeline: `adx_m66_0000` dengan 2 loop = 17.753.672 frame x 2
+kanal x 2 B = **71 MB** untuk satu lagu. Mixer tidak boleh begini — ia menarik 512–1024 frame per
+tick. `AdxStream` (`src/shim/adx.h`) adalah API tarik: satu buffer frame 32 sampel (128 B stereo),
+buffer output milik pemanggil, lompat loop O(1), dan **tanpa salinan payload ter-dekripsi**.
+`timeline_samples()` memberi panjang total supaya runtime bisa memutuskan kapan berhenti.
+
+Terukur (`tools/adx_stream_rss.cpp`, ikut di-commit): `adx_m66_0000`, file 7.168.000 B, timeline
+17.753.672 frame x 2 kanal x 2 B = **71.014.688 B** kalau dimaterialkan — peak RSS proses
+**11.108 KB**. Artinya timeline memang tidak pernah ada di memori; yang ada hanya byte ADX milik
+pemanggil + buffer frame 128 B + buffer blok pemanggil.
+
+**2) Kontrak yang dibuktikan, bukan diklaim**
+
+`read(count)` untuk `count` = 33 dan 4096 frame (semua 367 file) serta 1 dan 7 frame (8 file
+pertama) harus menghasilkan **byte identik** dengan `render_loop()` untuk ketiga state
+(`linear`, `carry`, `reset`) — termasuk `read()` setelah timeline habis harus mengembalikan 0, dan
+`timeline_samples()` harus sama dengan panjang render. Block 33 dipilih karena bukan pembagi 32
+(memaksa sisa frame), 4096 karena itu bentuk blok mixer; 1 dan 7 menghajar cache per-frame dan
+jalur offset. (Harness scratch juga menguji 256 frame — lulus, tapi angka run di bawah hanya
+yang tercetak gate ini.)
+
+**3) Dua hal yang tidak boleh salah, dan sempat salah**
+
+- **State prediktor di titik lompat.** Versi pertama memakai `run_` (state di *akhir* frame yang
+  sedang di-buffer). Untuk `loop_end` yang jatuh di tengah frame — 28 dari 45 stream — itu bukan
+  state di `loop_end`. Gate menangkapnya persis di seam: `adx_m66_0004` beda pertama di sampel
+  interleaved **26.363.070 = 13.181.535 x 2** (= `loop_end`), `adx_m66_0041` di **910.148 =
+  455.074 x 2**. Perbaikan: `history_at_cursor()` merekonstruksi 2 tap dari sampel frame yang
+  sudah ter-dekode (`entry_.h1` dipakai kalau offset = 1) — aritmetika yang sama dengan yang
+  dilakukan `render_loop` waktu membangun ulang state dari snapshot frame.
+- **Keystream type-8 saat lompat.** Keystream maju satu word per blok 18-byte. Kalau keystream
+  tidak di-rewind, loop kedua didekripsi dengan state lanjut → sampah, dan `carry`/`linear` akan
+  "beda" karena alasan yang salah. Solusi: snapshot `ls_ks_` (state sebelum blok frame
+  `loop_start`) diambil sekali di pass pertama, dipulihkan di `jump_to_loop_start()`.
+  Konsekuensinya `AdxStream` tidak perlu menyalin payload seperti `AdxDecoder::init()`.
+
+**4) Hasil gate (5 run, semua log identik)**
+
+Perintah: `./build/adx_test --no-ffmpeg --stream-check --loop-state auto`
+
+| run | exit | file | stream exact | blok cocok | wall |
+|---|---|---|---|---|---|
+| 1 | 0 | 367/367 | 367/367 | 2.250 | 251,57 s |
+| 2 | 0 | 367/367 | 367/367 | 2.250 | 248,93 s |
+| 3 | 0 | 367/367 | 367/367 | 2.250 | 302,76 s |
+| 4 | 0 | 367/367 | 367/367 | 2.250 | 331,20 s |
+| 5 | 0 | 367/367 | 367/367 | 2.250 | 213,33 s |
+
+- 2.250 = 367 file x 3 state x 2 blok (33, 4096) + 8 file pertama x 3 state x 2 blok tambahan
+  (1, 7) → **11.250 pembandingan byte-exact** untuk 5 run, 0 beda.
+- Body log 5 run identik: sha1 `87b4e0b4af5e102a18905519d8388fabb6cff6e5`.
+- Timeline yang dilalui = timeline 9b: **1.013.813.378** frame per kanal (akumulasi 45 file loop).
+- Potong timeline: `loops=0, tail=false` berhenti tepat di `loop_end` untuk **45/45** file loop
+  (dipakai untuk prelisten satu putaran).
+- Gate 9b tidak berubah di kode baru: jalur `decode_frame()` hanya dapat parameter tambahan
+  `key_word` (default 0 = perilaku lama), dan `render_loop()` tidak disentuh.
+- Satu run penuh regresi dengan kode 9c (ffmpeg + vgmstream + synth + loop-render + stream-check
+  sekaligus): exit 0, `pass=367/367`, `ffmpeg_exact=367/367`, `vgmstream_exact=367/367`,
+  `looprender_exact=45/45`, `stream_exact=367/367` (2.250 blok), `synth_failures=0`,
+  `trimmed_samples_total=572.592.917`, `loop_pcm_samples_total=1.013.813.378`,
+  wall **1782,09 s**, maxrss **928.452 KB**. Jadi parity ffmpeg/vgmstream tidak regresi karena
+  API baru, dan biaya verifikasinya diukur (bukan "kira-kira 15 menit").
+
+**5) Yang belum (jujur)**
+
+- `AdxStream` belum men-resample: 8 stream 24 kHz keluar tetap 24 kHz. Konversi ke laju SPU2
+  (48 kHz) belum ada, jadi belum ada klaim kualitas resampling.
+- Belum ada upload ke SPU2 / mixing / DSP, belum ada `sid` sound RPC (`0x80000006`, `0x80000592`).
+- Semantik loop di hardware tetap belum diputuskan (default = `linear`, referensi vgmstream);
+  `carry`/`reset` tersedia sebagai opsi.
+- Audio non-ADX (MPEG/SND di AFS, SFD/PSS) belum disentuh.
