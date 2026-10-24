@@ -328,6 +328,45 @@ static bool take_callback(u32& f, u32& a, u32& r) {
 }
 u32 pending_callbacks() { return (u32)g_cb_n; }
 
+// ---------------------------------------------------------------- INTC handlers
+// Game mendaftarkan 3 handler lewat syscall 16 (AddIntcHandler). Di HW asli handler
+// ini jalan di konteks interrupt; di port ini dijalankan lewat antrean callback yang
+// sama dengan end-func RPC (batas instruksi, stack thread yang sedang jalan).
+// Alasan konkret: 0x30B148 (tick frame EE) menaikkan counter 0x753D80 dan meng-kick
+// DMA GIF; tanpa dispatch, 0x30ADD8 menunggu counter itu selamanya.
+namespace {
+struct IntcEnt { u32 cause, handler, arg; };
+IntcEnt g_intc[16];
+int g_intc_n = 0;
+u64 g_intc_frames = 0, g_intc_fired = 0;
+}
+
+int intc_add(u32 cause, u32 handler, u32 arg) {
+    if (!handler) return -1;
+    for (int i = 0; i < g_intc_n; i++)
+        if (g_intc[i].handler == handler) { g_intc[i].cause = cause; g_intc[i].arg = arg; return i; }
+    if (g_intc_n >= 16) return -1;
+    g_intc[g_intc_n] = IntcEnt{cause, handler, arg};
+    return g_intc_n++;
+}
+
+bool intc_remove(u32 handler) {
+    for (int i = 0; i < g_intc_n; i++)
+        if (g_intc[i].handler == handler) { g_intc[i] = g_intc[--g_intc_n]; return true; }
+    return false;
+}
+
+void intc_dispatch(u32 cause) {
+    g_intc_frames++;
+    for (int i = 0; i < g_intc_n; i++)
+        if (g_intc[i].cause == cause) { request_callback(g_intc[i].handler, g_intc[i].arg, cause); g_intc_fired++; }
+}
+
+u64 intc_frame() { return g_intc_frames; }
+u32 intc_count() { return (u32)g_intc_n; }
+u64 intc_fired() { return g_intc_fired; }
+
+
 static bool ie_preempt_ok(u32 sr) {
     static const bool gate = std::getenv("GH_PREEMPT_IE") != nullptr;
     return !gate || (sr & 1u);
@@ -369,6 +408,21 @@ bool run(Cpu& c, SyscallFn handler, u64 max_inst) {
         if (c.halt_pc && cur_pc == c.halt_pc) {
             if (c.halt_skipped < c.halt_skip) { c.halt_skipped++; }
             else { c.halt_hits++; return false; }
+        }
+        // GH_PCTRACE=<hex>: cetak 16 pc pertama sesudah pc itu tercapai (provenance lompatan)
+        {
+            static u32 pt_pc = [] { const char* v = std::getenv("GH_PCTRACE");
+                                    return (u32)(v ? std::strtoul(v, nullptr, 0) : 0u); }();
+            static int pt_left = 0;
+            if (pt_pc) {
+                if (cur_pc == pt_pc && pt_left == 0) pt_left = 16;
+                if (pt_left > 0) {
+                    std::fprintf(stderr, "[pt] %llu pc=%08x npc=%08x a0=%08x a3=%08x v0=%08x ra=%08x cba=%d prev=%08x\n",
+                                 (unsigned long long)c.instret, cur_pc, c.next_pc, c.r[4][0], c.r[7][0],
+                                 c.r[2][0], c.r[31][0], (int)c.cb_active, c.prev_inst);
+                    pt_left--;
+                }
+            }
         }
         if (c.probe_pc && cur_pc == c.probe_pc && c.r[c.probe_reg][0] >= c.probe_min) {
             c.halt_hits++;
@@ -450,41 +504,42 @@ bool run(Cpu& c, SyscallFn handler, u64 max_inst) {
             c.cb_active = false;
             cur_pc = c.pc;
         }
-        const u32 prev_inst = c.prev_inst;
-        u32 inst = eebus::read32(c.pc);
-        c.pc = c.next_pc;             // delay slot semantics: slot sudah diprefetch
-        c.next_pc = c.pc + 4;
-        // --- end-func callback: panggil end_func(end_param, result) seperti _request_end
-        // Titik aman WAJIB: jangan ambil callback saat sedang di delay-slot branch
-        // (next_pc != pc+4 = ada target lompatan tertunda). Kalau diambil di situ,
-        // target `jr ra` hilang -> eksekusi jatuh ke instruksi berikutnya (terukur:
-        // resume di 0x3b006c menghapus return syscall 119 -> lari ke wrapper -119
-        // dengan a0=6, lalu masuk 0x398580 sebagai "deskriptor" -> tulis liar ke .text).
-        // Branch = op 0x01/0x02/0x03/0x04..0x07/0x14..0x17, atau SPECIAL funct 8/9.
-        // Instruksi tepat sesudah branch secara fisik = delay slot-nya.
+        // Deteksi kelas instruksi branch (op 0x01/0x02..0x07/0x14..0x17, SPECIAL
+        // funct 8/9). Instruksi tepat sesudah branch secara fisik = delay slot-nya.
         auto is_branch_inst = [](u32 w) -> bool {
             u32 o = w >> 26;
             if (o == 1 || (o >= 2 && o <= 7) || (o >= 0x14 && o <= 0x17)) return true;
             if (o == 0) { u32 f = w & 0x3F; return f == 8 || f == 9; }
             return false;
         };
-        const bool at_safe_point = (c.next_pc == c.pc + 4) && !is_branch_inst(prev_inst);
-        if (!c.cb_active && g_endfunc_on && at_safe_point) {
+
+        // --- end-func callback: panggil end_func(end_param, result) seperti _request_end ---
+        // Titik aman = BATAS INSTRUKSI SEBELUM fetch: (pc,next_pc) utuh, bukan delay slot.
+        //
+        // FIX 2026-10-24 (akar macetnya ADXF, terukur dgn GH_PCTRACE=0x398580):
+        // blok ini dulu duduk SESUDAH fetch. Kalau instruksi yang baru difetch adalah
+        // `jr ra` (pemanggil SceSifCallRpc baru selesai), handler jr menulis
+        // c.next_pc = CB_SENTINEL dan MENIMPA c.next_pc = f+4 milik callback →
+        // end_func 0x398580 hanya menjalankan SATU instruksi (`lui a1,0x2000`) lalu
+        // langsung "return" ke sentinel. Akibatnya 0x3984d8 (iSignalSema -67) tak
+        // pernah jalan, waiter Read_EE tak pernah bangun, LSN 2329 diulang 380x.
+        if (!c.cb_active && g_endfunc_on && c.next_pc == c.pc + 4 &&
+            !is_branch_inst(c.prev_inst)) {
             u32 f, a, r;
             if (take_callback(f, a, r)) {
                 c.cb_resume = c.pc;
                 if (c.cb_depth < 4) {
-                    Cpu::CbCtx& s = c.cb_save[c.cb_depth++];
-                    std::memcpy(s.r, c.r, sizeof(s.r));
-                    std::memcpy(s.lo, c.lo, sizeof(s.lo));
-                    std::memcpy(s.hi, c.hi, sizeof(s.hi));
-                    std::memcpy(s.f, c.f, sizeof(s.f));
-                    s.sa = c.sa; s.facc = c.facc; s.fcsr = c.fcsr; s.resume = c.cb_resume;
+                    Cpu::CbCtx& sv = c.cb_save[c.cb_depth++];
+                    std::memcpy(sv.r, c.r, sizeof(sv.r));
+                    std::memcpy(sv.lo, c.lo, sizeof(sv.lo));
+                    std::memcpy(sv.hi, c.hi, sizeof(sv.hi));
+                    std::memcpy(sv.f, c.f, sizeof(sv.f));
+                    sv.sa = c.sa; sv.facc = c.facc; sv.fcsr = c.fcsr; sv.resume = c.cb_resume;
                 }
                 if (std::getenv("GH_CB_DUMP")) {
                     std::fprintf(stderr,
-                        "[cb] arg=0x%08x n1=%u n2=%u d1=0x%08x d2=0x%08x s1=0x%08x s2=0x%08x sp=0x%08x\n",
-                        a, eebus::read32(a), eebus::read32(a + 4), eebus::read32(a + 8),
+                        "[cb] fn=0x%08x arg=0x%08x n1=%u n2=%u d1=0x%08x d2=0x%08x s1=0x%08x s2=0x%08x sp=0x%08x\n",
+                        f, a, eebus::read32(a), eebus::read32(a + 4), eebus::read32(a + 8),
                         eebus::read32(a + 12), eebus::read32(a + 16), eebus::read32(a + 20),
                         c.r[29][0]);
                 }
@@ -493,17 +548,13 @@ bool run(Cpu& c, SyscallFn handler, u64 max_inst) {
                 c.r[5][0] = r;              // a1 = result
                 c.pc = f; c.next_pc = f + 4;
                 c.cb_active = true;
-                static const bool cb_verbose = std::getenv("GH_CB_DUMP") != nullptr;
-                if (cb_verbose) {
-                    std::fprintf(stderr, "[cb] stub 3b0060..70: %08x %08x %08x %08x %08x\n",
-                        eebus::read32(0x3b0060), eebus::read32(0x3b0064), eebus::read32(0x3b0068),
-                        eebus::read32(0x3b006c), eebus::read32(0x3b0070));
-                    std::fprintf(stderr, "[cb] end_func=0x%08x arg=0x%08x res=%d (resume=0x%08x next=0x%08x prev=0x%08x instret=%llu)\n",
-                                 f, a, (int)r, c.cb_resume, c.next_pc, prev_inst,
-                                 (unsigned long long)c.instret);
-                }
+                cur_pc = c.pc;              // trace/watch ikut alamat end_func
             }
         }
+        const u32 prev_inst = c.prev_inst;
+        u32 inst = eebus::read32(c.pc);
+        c.pc = c.next_pc;             // delay slot semantics: slot sudah diprefetch
+        c.next_pc = c.pc + 4;
         c.fault_op = inst;
         c.prev_inst = inst;
         if (c.trace) c.trace[c.trace_pos = (c.trace_pos + 1) & c.trace_mask] = cur_pc;
@@ -564,6 +615,33 @@ bool run(Cpu& c, SyscallFn handler, u64 max_inst) {
             case 0x0B: if (c.r[rt(inst)][0] != 0) w32(c, rd(inst), c.r[rs(inst)][0]); break; // movn
             case 0x0C: {  // SYSCALL — nomor di reg v1 (konvensi EE, terverifikasi)
                 u32 num = c.r[3][0];
+                // Varian "i" (tanpa resched) dikodekan NEGATIF oleh wrapper PS2SDK:
+                //   iSignalSema @0x3afcd0 = `addiu v1,zero,-67; syscall` (byte ELF
+                //   bd ff 03 24 0c 00 00 00 terverifikasi). Tanpa normalisasi nomor
+                //   jadi 0xFFFFFFBD -> stub generik -> signal HILANG (terukur: 382
+                //   panggilan tanpa efek, satu per Read_EE yang tak pernah selesai).
+                //
+                // WHITELIST, bukan "semua negatif": nilai negatif lain yang muncul
+                // di lapangan (-189, -207) TIDAK ada sebagai literal `addiu v1,zero,N`
+                // di ELF, jadi asalnya belum terbukti bukan varian kernel. Membalik
+                // semuanya bisa memetakan nomor acak ke handler nyata (mis. 68 =
+                // WaitSema yang memblokir).
+                static const bool no_ivar = std::getenv("GH_NO_IVAR") != nullptr;
+                if ((s32)num < 0) {
+                    static u32 odd_seen[8]{}; static int odd_n = 0;
+                    if (no_ivar) { /* A/B: biarkan negatif jatuh ke stub */ }
+                    else if (num == 0xFFFFFFBDu) { num = 67; g_syscall_ivariant++; }  // iSignalSema (wrapper 0x3afcd0)
+                    else if (num == 0xFFFFFFCFu) { num = 49; g_syscall_ivariant++; }  // iReferThreadStatus (wrapper 0x3afbb0)
+                    else {
+                        bool known_odd = false;
+                        for (int i = 0; i < odd_n; i++) if (odd_seen[i] == num) known_odd = true;
+                        if (!known_odd && odd_n < 8) {
+                            odd_seen[odd_n++] = num;
+                            std::fprintf(stderr, "[sysdbg] syscall negatif tak dikenal raw=0x%08x pc=0x%08x (stub)\n",
+                                         num, c.pc);
+                        }
+                    }
+                }
                 g_syscall_pc = c.pc;
                 u32 v0 = 0;
                 bool known = handler(num, c.r[4][0], c.r[5][0], c.r[6][0], c.r[7][0], v0);
@@ -1053,9 +1131,19 @@ bool run(Cpu& c, SyscallFn handler, u64 max_inst) {
         // v1 → infinite loop (bukti: 55,8 M kali iterasi tanpa keluar). Sekarang: panggil
         // handler untuk side-effect saja; return-value syscall cuma ditulis jalur SYSCALL
         // instruksi (case 0x0C) yang memang menaruh hasil di v0 sesuai konvensi EE.
-        if ((c.instret % 60000ull) == 0) {
+        // Cadence VSync virtual (default 60k instruksi). GH_VSYNC=<n> utk kalibrasi:
+        // mesin asli ~5 M instruksi/frame (300 MIPS / 60 Hz), jadi 60k = 80x terlalu
+        // sering — handler VBLANK ikut jalan 80x lebih rapat dari HW.
+        static const u64 vsync_period = [] {
+            const char* v = std::getenv("GH_VSYNC");
+            u64 n = v ? std::strtoull(v, nullptr, 0) : 60000ull;
+            return n ? n : 60000ull;
+        }();
+        if ((c.instret % vsync_period) == 0) {
             u32 v0 = 0;
             handler(115, 0, 0, 0, 0, v0);
+            static const bool no_intc = std::getenv("GH_NO_INTC") != nullptr;
+            if (!no_intc) intc_dispatch(2);   // INTC_VBLANK_S (cause 2): tick frame 0x30B148
         }
         { // PC ring buffer crash trace
             static uint32_t pc_ring[16] = {};

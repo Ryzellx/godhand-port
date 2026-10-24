@@ -400,8 +400,8 @@ static s32 cdvd_ee_handler(u32 func, const std::vector<u8>& req, std::vector<u8>
     const u64 total64 = (u64)nsec * ss;
     const u32 total = (total64 > (u64)(64u << 20)) ? 0u : (u32)total64;   // sanity: <= 64 MB
     u32 got = 0;
+    std::vector<u8> buf(total);
     if (total) {
-        std::vector<u8> buf(total);
         got = iso9660::read_sectors(lsn, nsec, buf.data(), ss);
         if (got) eebus::mem_write(dst & 0x1FFFFFFFu, buf.data(), got);   // IOP juga transfer parsial
     }
@@ -414,10 +414,24 @@ static s32 cdvd_ee_handler(u32 func, const std::vector<u8>& req, std::vector<u8>
         info[off] = (u8)v; info[off + 1] = (u8)(v >> 8);
         info[off + 2] = (u8)(v >> 16); info[off + 3] = (u8)(v >> 24);
     };
-    p32(0, prefix);                 // s7: byte awal yang dibuang (offset & 63)
-    p32(4, trail);                  // s6: byte ekor setelah blok 64 B terakhir
-    p32(8, dst);                    // alamat tujuan EE
-    p32(12, dst + prefix + main_len);   // batas transfer 64 B terakhir
+    // Layout 144 B TERUKUR dari pemakai sebenarnya (game 0x398580 — end_func jalur ini):
+    //   {+0 head_len; +4 tail_len; +8 head_dst; +0xC tail_dst; +0x10 head[64]; +0x50 tail[64]}
+    // Rutin itu menyalin head[64]/tail[64] ke dst; artinya IOP mengirim byte head/tail
+    // yang TIDAK ikut DMA 64B-align. Native kita menulis SELURUH sektor ke dst, jadi
+    // menyalin nol ke ekor = merusak 24 B terakhir tiap sektor 2328 (terukur: ADXF
+    // mengulang LSN 2329 380x). Default: isi head/tail dengan byte NYATA dari data
+    // supaya salinan rutin itu idempoten. GH_CTX_FLAT=1 -> nol (A/B).
+    const bool ctx_flat = std::getenv("GH_CTX_FLAT") != nullptr;
+    p32(0, ctx_flat ? 0u : prefix);
+    p32(4, ctx_flat ? 0u : trail);
+    p32(8, dst);
+    p32(12, dst + prefix + main_len);
+    // isi byte head/tail nyata (idempoten kalau rutin 0x398580 menyalinnya kembali ke dst)
+    if (!ctx_flat && got) {
+        const u32 hl = prefix, tl = trail;
+        if (hl && hl <= 64 && hl <= got) std::memcpy(&info[16], buf.data(), hl);
+        if (tl && tl <= 64 && tl <= got) std::memcpy(&info[0x50], buf.data() + (got - tl), tl);
+    }
     if (ctx) eebus::mem_write(ctx & 0x1FFFFFFFu, info.data(), info.size());
     if (outp) { u32 v = got; eebus::mem_write(outp & 0x1FFFFFFFu, &v, 4); }
     if (got == total && total) { g_cdvd_read_ok++; g_cdvd_read_bytes += got; }

@@ -15,10 +15,16 @@ void watch_set(u32 lo, u32 hi) { g_watch_lo = lo; g_watch_hi = hi; }
 
 namespace {
 inline void watch_log(u32 addr, u32 val, int sz) {
-    if (!g_watch_lo || addr < g_watch_lo || addr >= g_watch_hi) return;
+    if (!g_watch_lo) return;
+    // Alias EE (0x2xxxxxxx uncached / 0x8xxxxxxx) dinormalkan: game sering menulis
+    // field objek lewat alias, jadi jendela watch harus melihat alamat kanonik
+    // (terukur: fd+1 tidak pernah muncul sebelum normalisasi ini).
+    u32 a = addr & 0x1FFFFFFFu;
+    if (a < g_watch_lo || a >= g_watch_hi) return;
     g_watch_hits++;
     if (g_watch_hits <= g_watch_cap)
-        std::fprintf(stderr, "[WW] pc=%08x addr=%08x val=%08x sz=%d\n", g_cur_pc, addr, val, sz);
+        std::fprintf(stderr, "[WW] pc=%08x addr=%08x val=%08x sz=%d raw=%08x\n",
+                     g_cur_pc, a, val, sz, addr);
 }
 
 std::vector<u8> g_ram;      // lazily allocated 32 MB

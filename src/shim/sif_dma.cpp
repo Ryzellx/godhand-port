@@ -262,8 +262,18 @@ u32 kick(u32 sdd_addr, u32 count) {
                 // auto-bind stub 4-byte nol supaya handshake tidak menggantung. Ini
                 // MODEL, bukan implementasi modul asli — dicatat di stats.autostub.
                 if (g_autostub) {
-                    sifrpc::bind(sid, "autostub", [](u32, const std::vector<u8>&, std::vector<u8>& rep) {
+                    // SID tanpa backend: replay 4 byte nol (perilaku lama). Untuk
+                    // 0x80000593 fno 12 (poll tanpa payload, reply 4 B) nilai balasan
+                    // bisa di-override lewat GH_STUB593=<n> — game memanggilnya 4.330x
+                    // di 300 M dan berhenti di situ, jadi isi balasan ini yang diuji A/B.
+                    const u32 s_id = sid;
+                    sifrpc::bind(sid, "autostub", [s_id](u32 f, const std::vector<u8>&, std::vector<u8>& rep) {
+                        u32 v = 0;
+                        if (s_id == 0x80000593u && f == 12u) {
+                            if (const char* e = std::getenv("GH_STUB593")) v = (u32)std::strtoul(e, nullptr, 0);
+                        }
                         rep.assign(4, 0);
+                        rep[0] = (u8)v; rep[1] = (u8)(v >> 8); rep[2] = (u8)(v >> 16); rep[3] = (u8)(v >> 24);
                         return 0;
                     });
                     g_st.autostub++;

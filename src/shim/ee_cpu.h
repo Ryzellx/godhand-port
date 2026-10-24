@@ -146,6 +146,14 @@ bool thread_yield_if_other();
 // Phase 7b.9: census busy-delay loop yang di-fast-forward (idiom
 // addiu rt,rt,-1 / 4x nop / bne rt,rs,self). Semantik tetap eksak.
 inline u32 g_syscall_pc = 0;   // pc instruksi SYSCALL terakhir (diagnosa provenance)
+inline u64 g_syscall_ivariant = 0;   // jumlah syscall varian "i" (nomor negatif) yang dinormalkan
+// INTC handler table (syscall 16/17/19). Pixel/VSync dispatch: lihat intc_dispatch().
+int  intc_add(u32 cause, u32 handler, u32 arg);
+bool intc_remove(u32 handler);
+void intc_dispatch(u32 cause);      // panggil semua handler utk cause (queue end-func style)
+u64  intc_frame();
+u32  intc_count();
+u64  intc_fired();                  // jumlah callback INTC yang sudah diantrekan
 // antrean callback end-func (maks 8; dipakai sif_dma saat RPC non-block selesai)
 inline constexpr u32 CB_SENTINEL = 0xFFFFFFFCu;
 void request_callback(u32 func, u32 arg, u32 result);

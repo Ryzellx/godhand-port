@@ -95,9 +95,13 @@ Metode: static decompilation + reimplementation layer (jalur OpenGOAL-style).
       Dinding sekarang: ADXF state byte (handle+1) tetap **2 "read issued"**, belum 3 "read end";
       transisi 3 ada di 0x323C58 (kondisi v0==0) dan tidak tercapai — berikutnya: jalur completion
       ADXF (callback 0x3A8580 + ctx 144 B @0x3F9740) sebelum VU1/render disentuh.
-- [~] Phase 10 — scheduler thread EE (LOG #20): 5 thread ADXF hidup, Read_EE 2.257 baca /
-      4,9 MB, RPC 9.118 call, nol fault; dinding baru = jalur completion ADXF (`0x323AA0` →
-      `0x323F18` → `0x323A00`, service `0x323B58`/`0x324008` belum pernah dipanggil).
+- [x] Phase 10 — scheduler thread EE (LOG #20): 5 thread ADXF hidup, RPC 9.118 call, nol fault.
+- [~] Phase 11 — varian syscall `i` (LOG #21): `iSignalSema` = `-67` (wrapper ELF `0x3afcd0`),
+      dulu hilang di stub → `fd+1` tak pernah balik. Sekarang **status fd mencapai 3**
+      (`0x3285E4` @inst 44,80 M), ADXF `0x323A00`/`0x323AA0` **jalan pertama kali**, dan Read_EE
+      maju berurutan (LSN 2175×154, 755203×2, 2329..2334, 755204×17, 8120×2 = 10 read / 370.688 B;
+      dulu 2.255× retry LSN 2329). Dinding baru: loop RPC `0x80000593` fno 12 (4.330×) +
+      `0x19720317` fno 2 (3.304×); `0x323F18`/`0x324008` (service main loop) masih 0 instruksi.
 - [ ] **PLAYABLE** 🎮 (stage st0 load + input + render loop)
 
 ## Engine Intel (ringkas — detail di ENGINE-MAP.md)
@@ -702,3 +706,59 @@ offset; setelah itu baru status 3 → VU1/render.
   fungsi itu membaca `ctx[0]` sebagai **jumlah byte** lalu menyalin dari `ctx+16`, bukan
   layout `{prefix,trail,dst,boundary}` yang kita tulis. Kandidat kuat berikutnya: layout
   ctx 144 B untuk jalur ini salah, sehingga handler completion tidak pernah menandai selesai.
+
+### LOG 2026-10-24 #21 (Phase 11: iSignalSema `i`-variant = akar status fd; ADXF completion AKHIRNYA jalan; ctx-144B falsified)
+
+**Akar dinding LOG #20 (bukan tebakan):** status fd object `0x3D0DD0+1` tak pernah balik ke 1 karena
+satu-satunya pemicunya — `iSignalSema` — dipanggil lewat **nomor syscall negatif**. Wrapper di ELF
+`0x3afcd0` = `addiu v1,zero,-67 ; syscall` (byte `bd ff 03 24 0c 00 00 00`). Shim lama membandingkan
+`num` sebagai u32 → `0xFFFFFFBD` → jatuh ke stub generik (`v0=0`, tanpa efek). Jadi 1 signal hilang
+per read; `WaitSema` cuma "selamat" karena model autosig Phase 7b.9, dan itu yang membuat loop
+mengulang LSN 2329 **2.255×** tanpa pernah maju.
+
+**Yang dibangun:**
+- `ee_cpu` SYSCALL: normalisasi **whitelist** varian `i` (`-67 → 67 iSignalSema`, `-49 → 49
+  iReferThreadStatus`) + census `[sysdbg]` untuk negatif tak dikenal (jangan balik semua negatif:
+  `-68` akan memetakan ke WaitSema yang memblokir). Gate A/B `GH_NO_IVAR`.
+- `crt0_test` sys 49 = `iReferThreadStatus` (kontrak sama dengan 48: isi struct, bukan cuma `v0=0`).
+- `ee_cpu` INTC nyata: sys 16 `AddIntcHandler` menyimpan handler, `intc_dispatch(2)` tiap VSync
+  virtual (60k instruksi) → tick frame `0x30B148`. Gate A/B `GH_NO_INTC` (terukur: **tidak**
+  mengubah jumlah read; effect-nya di jalur frame, bukan CD).
+- Callback end-func dipindah ke **batas instruksi sebelum fetch** (`pc/next_pc` utuh, bukan delay
+  slot) + `cur_pc` ikut end_func supaya trace/watch tidak meleset.
+- `sif_rpc` ctx 144 B: byte head/tail ikut diisi dari data nyata (idempoten kalau rutin 0x398580
+  menyalinnya). Gate `GH_CTX_FLAT`.
+- Diagnosa baru: `GH_TOP=<n>`, `GH_NO_IVAR`, `GH_NO_INTC`, `GH_STUB593=<n>`, `[sysdbg]` negatif.
+
+**Angka nyata `crt0_test 400 M` (5× md5 identik `fc52f27f`):**
+
+| Metrik | LOG #20 (HEAD `8750803`) | Sekarang |
+|---|---|---|
+| Read_EE | 2.257 ok / 4.937.728 B — **2.255 di antaranya retry LSN 2329** | **10 ok / 370.688 B, LSN maju:** 2175×154, 755203×2, **2329..2334**×1, 755204×17, 8120×2 |
+| `fd+1` status | tetap 2 (tak pernah 3) | **mencapai 3** — `0x3285E4` dieksekusi di inst 44.802.183 |
+| `0x323A00` (ADXF notify) | 0 instruksi sepanjang 400 M | **44.802.613** (pertama kali) |
+| `0x323AA0` (dispatch status==2) | 0 instruksi | **45.415.202** (pertama kali) |
+| `end_func 0x398580` | 2.257 (jalur callback) | **0** — read kini selesai sinkron; jalur callback tak lagi dipakai |
+| RPC call | 9.118 | 8.406 |
+| INTC | handler 0 / fired 0 | **3 handler, 5.922 fired / 6.665 frame** |
+| GIF kicks | 18.689 | 18.689 (sama — belum render) |
+| Titik akhir 400 M | 0x324E98 (idle ADXF) | 0x324E9C (idle ADXF) |
+
+**Falsified (jujur):** hipotesis "layout ctx 144 B salah" dari addendum #20 **salah untuk stall ini**.
+Disasm `0x398580`: `[ctx+0]`=head_len → salin dari `ctx+0x10` ke `[ctx+8]`; `[ctx+4]`=tail_len →
+salin dari `ctx+0x50` ke `[ctx+0xC]`; lalu lompat `0x3984D8` (simpan hasil + `iSignalSema`). Dump live
+`0x3F9740` = `{0,0,0x3C5300,0x3C5B00}` → head_len=tail_len=**0** → nol byte disalin, nol korupsi.
+
+**Dinding baru (dengan bukti):** setelah 10 read, game masuk **loop RPC**, bukan render:
+- `sid=0x80000593 fno=12` **4.330×** (send=0, reply 4 B) — server tak punya backend (autostub).
+  Bind-nya di `0x398F7C` (klien `cd=0x003FA1C0`), pola identik dengan bind cdvd_ee `0x398C7C`.
+  A/B isi balasan `GH_STUB593=0/1/2/3` → **nol perubahan** (hipotesis "poll butuh 1" salah).
+- `sid=0x19720317 fno=2` **3.304×** (payload 64 B `{0,0x76A9C0,0x76B1C0}`) — SID sampah hasil bind
+  di `cd=0x0076A95C`; kuat dugaan SID dibaca dari IRX yang kita "load" tanpa eksekusi.
+- `0x323F18`, `0x324008`/`0x324040` (service ADXF dari main loop `0x200F9C`/`0x201048`) tetap
+  0 instruksi (probe 400 M).
+- `loadfile fno=6` masih autostub (8 panggilan), modul termuat = 1 (`cri_adxi.irx` 76.928 B).
+
+**Floor 5× (md5 stdout identik, semua PASS):** `sif 41/41` 73372ce0 · `sif_dma 11/11` 435566a1 ·
+`shim cc2ea3b0` · `bus 20/20 a06a36af` · `mmi 25/25 accd196e` · `gif ade54fea` · `iso 18/18 e8332a85` ·
+`crt0 30 M b2c37ecb / 200 M 3b9380b0 / 400 M fc52f27f`, semua `stop=clean-cap`, nol fault.

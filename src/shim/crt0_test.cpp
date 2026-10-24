@@ -29,6 +29,7 @@ static u32 g_heap_end = 0;
 static u32 g_hist[1u << 21]{};         // hot-PC sampler: bucket = pc>>2 (per instr; 8 MB)
 static u64 g_btb[1u << 21]{};          // backward-taken-branch census per alamat (16 MB)
 static u64 g_sema_autosig = 0;         // WaitSema auto-signal (virtual INTC event) — Phase 7b.9
+static u64 g_isig = 0;                 // iSignalSema (varian -67) yang benar-benar men-signal
 
 // shim syscall — mapping ke eekern (kontrak dari syscall_contract.csv)
 static eekern::SemaParam g_sp;
@@ -64,7 +65,11 @@ static void gif_kick_census(const void* packet, u32 qwc) {
 static bool sys_handler(u32 num, u32 a0, u32 a1, u32 a2, u32 a3, u32& v0) {
     if (num < 160) g_census[num]++; else g_census_oob++;
     switch (num) {
-    case 16: v0 = 1; return true;   // AddIntcHandler — native: no-op dispatch (dispatch IRQ nanti)
+    case 16: { // AddIntcHandler(cause, handler, arg, next)
+        std::fprintf(stderr, "[intc] add cause=%u handler=0x%08x arg=0x%08x next=%u pc=0x%08x\n",
+                     a0, a1, a2, a3, eecpu::g_syscall_pc);
+        v0 = (u32)eecpu::intc_add(a0, a1, a2);
+        return true; }
     case 10: v0 = 1; return true; case 11: case 12: v0 = 0; return true;   // SbusIntc/Interrupt2Iop
     case 13: case 14: case 15: v0 = 0; return true;                          // VTLB/VCommon/VInterrupt handler
     case 17: case 19: v0 = 0; return true;                                  // Remove{Intc,Dmac}Handler
@@ -82,6 +87,9 @@ static bool sys_handler(u32 num, u32 a0, u32 a1, u32 a2, u32 a3, u32& v0) {
     }
     case 65: v0 = (u32)eekern::DeleteSema((s32)a0); return true;   // DeleteSema
     case 66: v0 = (u32)eekern::SignalSema((s32)a0); return true;   // SignalSema
+    // iSignalSema: wrapper PS2SDK `addiu v1,zero,-67`. Dulu nomor negatif jatuh ke stub
+    // generik -> signal hilang -> waiter Read_EE tak pernah bangun (retry LSN sama).
+    case 67: { s32 r = eekern::SignalSema((s32)a0); g_isig++; v0 = (u32)r; return true; }
     case 68: {  // WaitSema — blokir di host futex. Bukti deadlock 2026-10-21: gdb bt
                 // menunjuk eekern::WaitSema(id=4) ← sys 68, 0% CPU, 1 thread, tanpa
                 // signaler (census: CreateThread 32:1 tapi StartThread 34:0 — thread
@@ -134,7 +142,11 @@ static bool sys_handler(u32 num, u32 a0, u32 a1, u32 a2, u32 a3, u32& v0) {
     case 33: v0 = eecpu::thread_delete((int)a0) ? 0u : (u32)-1; return true;  // DeleteThread
     case 37: v0 = 0; return true;                                           // TerminateThread
     case 44: eecpu::thread_yield(); v0 = 0; return true;                    // iRotateThreadReadyQueue
-    case 48: {  // ReferThreadStatus — field yang DIBACA game: +0 status, +8 stack, +0xc size
+    case 48: case 49: {  // ReferThreadStatus / iReferThreadStatus (49 = varian tanpa
+                // resched; wrapper game 0x3afbb0 mengirim v1=-49 -> dinormalkan di
+                // ee_cpu). Kontraknya sama: isi struct status, bukan sekadar v0=0 —
+                // kalau struct dibiarkan basi, pemanggil membaca ukuran/stack sampah.
+                // field yang DIBACA game: +0 status, +8 stack, +0xc size
                 // (bukti: 0x3B0C20 `lw v1,12(sp); lw v0,8(sp); addu v0,v0,v1; addiu -672`).
         int tid = (int)a0;
         eebus::write32(a1 + 0, eecpu::thread_alive(tid) ? 0x10u : 0x02u);  // 0x10 = WAIT (siap start)
@@ -403,6 +415,10 @@ int main(int argc, char** argv) {
     for (u32 r = 0; r < 16; r++) if (eekern::sif_set_count(r)) std::printf(" %u:%llu", r, (unsigned long long)eekern::sif_set_count(r));
     if (eekern::sif_set_count(16)) std::printf(" oob:%llu(last=0x%08x)", (unsigned long long)eekern::sif_set_count(16), eekern::sif_oob_last(1));
     std::printf(" | reg4=0x%08x\n", eekern::sif_reg_peek(4));
+    std::printf("intc: handlers=%u fired=%llu frames=%llu\n", eecpu::intc_count(),
+                (unsigned long long)eecpu::intc_fired(), (unsigned long long)eecpu::intc_frame());
+    std::printf("sema-isig=%llu ivariant=%llu\n", (unsigned long long)g_isig,
+                (unsigned long long)eecpu::g_syscall_ivariant);
     std::printf("sema-autosig=%llu (WaitSema virtual-event, Phase 7b.9)\n",
                 (unsigned long long)g_sema_autosig);
 
@@ -429,7 +445,8 @@ int main(int argc, char** argv) {
     u64 samples = 0; for (auto& h : hs) samples += h.n;
     std::printf("hot-pc top12 (samples=%llu/%llu instr):\n",
                 (unsigned long long)samples, (unsigned long long)cpu.instret);
-    for (size_t i = 0; i < hs.size() && i < 12; i++) {
+    const size_t topn = std::getenv("GH_TOP") ? (size_t)std::atoi(std::getenv("GH_TOP")) : 12;
+    for (size_t i = 0; i < hs.size() && i < topn; i++) {
         u32 pc = hs[i].b << 2;
         std::printf("  0x%08x %-7s n=%-10u %5.2f%%\n", pc, region_of(pc), hs[i].n,
                     samples ? 100.0 * hs[i].n / samples : 0.0);

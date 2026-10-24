@@ -128,3 +128,22 @@ delay-slot (terukur: memset `0x3A5364` jatuh ke loop byte `a2=0xFFFF8310`).
 - **SID terpakai saat boot** (dari log BIND): 0x80000100/0x80000101 (pad), 0x80000001 (fileio),
   0x80000003 (iopheap), 0x80000006 (loadfile), 0x80000400 (mcserv), 0x90000200 (SJX/CRI),
   0x80000592 & 0x19720317 & 0x80000701 (autostub — belum diidentifikasi).
+
+### 7.3 Varian syscall `i` + rantai status fd (Phase 11, 2026-10-24)
+
+- **Varian `i` = nomor NEGATIF.** Wrapper terverifikasi dari byte ELF:
+  | wrapper | instruksi | arti | dipakai port |
+  |---|---|---|---|
+  | `0x3AFCD0` | `addiu v1,zero,-67 ; syscall` | `iSignalSema` | → sys 67 (whitelist) |
+  | `0x3AFBB0` | `addiu v1,zero,-49 ; syscall` | `iReferThreadStatus` | → sys 49 (struct status diisi) |
+  | `0x3AFBC0` / `0x3AFBD0` | `+50` / `+51` (positif) | `SleepThread` / `iSleepThread` | sys 50/51 (yield) |
+  Nilai negatif lain (`-189`, `-207`) **tidak** berasal dari literal `addiu v1,zero,N` → dicatat
+  `[sysdbg]` dan dibiarkan jadi stub; jangan balik semua negatif (`-68` = WaitSema memblokir).
+- **Rantai status file game (terukur):** `fd+1` = status (1 idle · 2 read issued · 3 read end ·
+  4 error), `fd+2` = pending flag, `fd+4` = nama, `fd+8` = objek device, `fd+20` = panjang,
+  `fd+24`(`+0x18`) = dst buffer, `fd+0x58` = posisi. `0x3284B8` = driver state machine
+  (bila `fd+2` set → bandingkan `device.status` (`vtable+44` → `0x333130` = `lb [dev+2]`) dengan
+  `fd+1`; sama → salin data, majukan `fd+0x58`, `0x3285E4` set status 3 bila posisi ≥ panjang).
+- **`0x398580` bukan CD end-func data**, tapi wrapper generik: `[ctx+0]`=head_len → salin
+  `ctx+0x10` → `[ctx+8]`; `[ctx+4]`=tail_len → salin `ctx+0x50` → `[ctx+0xC]`; lalu `0x3984D8`
+  (simpan hasil ke `0x3F8680`, `iSignalSema(0x3F8678)`). Untuk read sektor penuh head/tail = 0.
