@@ -72,10 +72,17 @@ add_executable(crt0_test
   src/shim/sif_rpc.cpp
   src/shim/sif_dma.cpp
   src/shim/memcard.cpp
+  src/shim/iso9660.cpp
   src/gif/gif.cpp)
 target_include_directories(crt0_test PRIVATE src/shim src/gif)
 find_package(Threads REQUIRED)
 target_link_libraries(crt0_test PRIVATE Threads::Threads)
+
+# 4b) iso_test — pembaca ISO9660 mentah (CDVD backend), dibandingkan dengan hasil extract
+add_executable(iso_test
+  src/shim/iso_test.cpp
+  src/shim/iso9660.cpp)
+target_include_directories(iso_test PRIVATE src/shim)
 
 # 5) M7b unit probe — semantik branch/delay-slot/jal-jr kanonik MIPS + BTB census
 add_executable(branch_test
@@ -129,7 +136,8 @@ add_executable(sif_test
   src/shim/sif_test.cpp
   src/shim/sif_rpc.cpp
   src/shim/host_io.cpp
-  src/shim/memcard.cpp)
+  src/shim/memcard.cpp
+  src/shim/iso9660.cpp)
 target_include_directories(sif_test PRIVATE src/shim)
 
 # adx_test: decoder CRI ADX vs referensi ffmpeg (bit-exact <=1 LSB)
@@ -145,6 +153,7 @@ add_executable(sif_dma_test
   src/shim/sif_rpc.cpp
   src/shim/host_io.cpp
   src/shim/memcard.cpp
+  src/shim/iso9660.cpp
   src/shim/ee_bus.cpp
   src/shim/ee_kernel.cpp
   src/shim/ee_cpu.cpp)   # eecpu::request_callback (end-func RPC, Phase 9)

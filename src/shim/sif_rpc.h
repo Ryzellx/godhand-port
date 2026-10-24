@@ -25,6 +25,9 @@ enum : u32 {
     SRV_MCSERV   = 0x80000400u,   // mcman.irx @0x4300 + mcserv.irx @0x2e4
     SRV_SJX      = 0x90000200u,   // SJX/CRI sound engine (libsjx + cri_adxi)
     SRV_PAD      = 0x80000100u,   // padman.irx @0x7a80 (0x80000101 = server kedua)
+    SRV_CDVDFS   = 0x80000597u,   // cdvdfsv.irx (IOPRP310 m09.elf): file system CD
+                                  // (open/read file disc). Dispatch server ASLI by size
+                                  // paket (300 = open), bukan fno — lihat cdvfs_handler.
 };
 
 struct Header {
@@ -50,6 +53,17 @@ std::vector<u8> encode(u32 server, u32 func, const std::vector<u8>& req);
 bool decode(const std::vector<u8>& pkt, Header& h, std::vector<u8>& payload);
 
 void install_defaults();
+
+// DMA balik IOP->EE. Server CD (cdvdfsv) menulis struct hasil langsung ke buffer client
+// di EE: paket 300 B menyimpan pointer EE-nya sendiri di +292. Di HW itu DMA IOP->EE;
+// di sini antrean satu-slot yang dieksekusi sifdma setelah handler selesai.
+struct EeWrite { u32 addr = 0; std::vector<u8> data; };
+void ee_writeback(u32 addr, const std::vector<u8>& d);
+bool take_ee_writeback(EeWrite& out);
+
+u64 cdvfs_open_ok();
+u64 cdvfs_open_miss();
+u64 cdvfs_other_calls();
 
 struct Stats { u64 calls = 0, unknown = 0, bytes_in = 0, bytes_out = 0; };
 const Stats& stats();

@@ -7,6 +7,7 @@
 #include "ee_bus.h"
 #include "ee_kernel.h"
 #include "sif_rpc.h"
+#include "iso9660.h"
 #include "sif_dma.h"
 #include "gif.h"
 #include "memcard.h"
@@ -274,6 +275,10 @@ int main(int argc, char** argv) {
         cpu.trace_hi = dash == std::string::npos ? cpu.trace_lo + 4 : (u32)std::strtoul(ww.substr(dash + 1).c_str(), nullptr, 0);
     }
 
+    // ISO retail = sumber CDVD. Kalau tidak ada, backend jatuh ke extract/ (GH_CDROOT).
+    if (iso9660::mount("")) std::fprintf(stderr, "[iso] mounted %s\n", iso9660::image_path().c_str());
+    else std::fprintf(stderr, "[iso] TIDAK termount — CDVD hanya lewat extract/\n");
+
     auto t0 = std::chrono::steady_clock::now();
     bool stopped = eecpu::run(cpu, sys_handler, cap);  // main-loop long-run
     auto t1 = std::chrono::steady_clock::now();
@@ -431,6 +436,10 @@ int main(int argc, char** argv) {
                     (unsigned long long)d.payload_bytes,
                     (unsigned long long)d.reply_bytes, d.last_cid, d.last_server, d.last_func,
                     (int)d.last_result);
+        std::printf("cdvfs: open_ok=%llu open_miss=%llu other=%llu\n",
+                    (unsigned long long)sifrpc::cdvfs_open_ok(),
+                    (unsigned long long)sifrpc::cdvfs_open_miss(),
+                    (unsigned long long)sifrpc::cdvfs_other_calls());
         const sifrpc::Stats& r = sifrpc::stats();
         std::printf("host-rpc: calls=%llu unknown=%llu in=%llu B out=%llu B | memcard root=%s\n",
                     (unsigned long long)r.calls, (unsigned long long)r.unknown,

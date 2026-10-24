@@ -2,6 +2,7 @@
 #include "sif_rpc.h"
 #include "host_io.h"
 #include "memcard.h"
+#include "iso9660.h"
 #include <algorithm>
 #include <cstring>
 #include <map>
@@ -51,9 +52,23 @@ u32 vfs_close(s32 fd) {
 u32 vfs_size(s32 fd) {
     return fd >= 1000 ? memcard::size(fd) : hostio::size(fd);
 }
+EeWrite g_ee_wr;
 } // namespace
 
-void reset() { g_srv.clear(); g_st = {}; }
+static u64 g_cdvfs_open_ok = 0, g_cdvfs_open_miss = 0, g_cdvfs_other = 0;
+
+void ee_writeback(u32 addr, const std::vector<u8>& d) { g_ee_wr.addr = addr; g_ee_wr.data = d; }
+bool take_ee_writeback(EeWrite& out) {
+    if (!g_ee_wr.addr || g_ee_wr.data.empty()) return false;
+    out = g_ee_wr;
+    g_ee_wr.addr = 0; g_ee_wr.data.clear();
+    return true;
+}
+u64 cdvfs_open_ok() { return g_cdvfs_open_ok; }
+u64 cdvfs_open_miss() { return g_cdvfs_open_miss; }
+u64 cdvfs_other_calls() { return g_cdvfs_other; }
+
+void reset() { g_srv.clear(); g_st = {}; g_ee_wr = {}; g_cdvfs_open_ok = g_cdvfs_open_miss = g_cdvfs_other = 0; }
 
 bool bind(u32 server, const std::string& name, Handler h) {
     g_srv[server] = Server{name, std::move(h)};
@@ -287,6 +302,62 @@ static s32 cdvd_handler(u32 func, const std::vector<u8>& req, std::vector<u8>& r
     }
 }
 
+// ---------------------------------------------------------------- cdvdfsv
+// SID 0x80000597 = cdvdfsv.irx (modul m09.elf di IOPRP310.IMG, 33.440 B). Kontrak diambil
+// dari server aslinya, bukan tebakan: handler 0x7AC mendispatch menurut PANJANG paket
+// (bukan fno) — 300 B = open, 296 B = operasi lain — lalu menyalin struct hasil 36 B ke
+// alamat EE yang disimpan klien di paket+292 (DMA IOP->EE), dan reply 4 B = nilai balik.
+// Klien game (0x398890) memakai hasil itu: cvFsOpen 0x332C84 `lw a1,36(s1)` (= info+4)
+// sebagai ukuran file, dan nilai balik != 0 sebagai tanda sukses.
+static std::string cdvfs_name(const std::vector<u8>& req) {
+    std::string name;
+    for (size_t i = 36; i < req.size() && i < 36 + 256 && req[i]; ++i) name.push_back((char)req[i]);
+    return name;
+}
+
+static s32 cdvfs_handler(u32 func, const std::vector<u8>& req, std::vector<u8>& reply) {
+    (void)func;
+    if (req.size() < 40) { put32(reply, 0); return 0; }
+    std::string name = cdvfs_name(req);
+    if (std::getenv("GH_CDVFS_DUMP")) {
+        std::fprintf(stderr, "[cdvfs] n=%zu mode=%u name=\"%s\"\n",
+                     req.size(), get32(req, req.size() >= 300 ? 296 : 292), name.c_str());
+    }
+    // --- open (paket 300 B) ---
+    if (req.size() == 300) {
+        u32 lba = 0, size = 0; bool dir = false;
+        bool found = iso9660::lookup(name, lba, size, dir);
+        if (!found) {                       // fallback: hasil ekstraksi di disk
+            hostio::Stat hst{};
+            if (hostio::stat(name, hst)) { found = true; size = hst.size; dir = (hst.mode & 1) != 0; lba = 0; }
+        }
+        std::vector<u8> info(36, 0);
+        if (found && !dir) {
+            // Field yang TERBUKTI dibaca klien: +4 = ukuran byte. +0 = status (1 = ada),
+            // +8 = LBA awal. Field lain nol sampai ada konsumen yang membacanya.
+            info[0] = 1;
+            for (int k = 0; k < 4; k++) { info[4 + k] = (u8)(size >> (8 * k)); }
+            for (int k = 0; k < 4; k++) { info[8 + k] = (u8)(lba >> (8 * k)); }
+            put32(reply, size ? size : 1);
+            g_cdvfs_open_ok++;
+        } else {
+            put32(reply, 0);
+            g_cdvfs_open_miss++;
+            if (std::getenv("GH_CDVFS_DUMP") || std::getenv("GH_SIF_DUMP"))
+                std::fprintf(stderr, "[cdvfs] open MISS \"%s\" dir=%d\n", name.c_str(), (int)dir);
+        }
+        u32 ee = get32(req, 292) & 0x1FFFFFFFu;
+        if (ee) ee_writeback(ee, info);
+        return 0;
+    }
+    // --- selain open: belum dipetakan, jangan mengarang hasil ---
+    g_cdvfs_other++;
+    if (std::getenv("GH_CDVFS_DUMP") || std::getenv("GH_SIF_DUMP"))
+        std::fprintf(stderr, "[cdvfs] n=%zu (belum dipetakan) name=\"%s\"\n", req.size(), name.c_str());
+    put32(reply, 0);
+    return 0;
+}
+
 // ---------------------------------------------------------------- loadfile
 // Ground truth: IOPRP310.IMG, modul ROMDIR "LOADFILE" (ELF #12). Tabel jump fno 0..10
 // di .data 0x1ca8 (0x150 0x240 0x3d0 0x360 0x1fc 0x2f8 0x434 0x4ac 0x4f0 0x520 0x54c),
@@ -484,6 +555,7 @@ void install_defaults() {
     memcard::init();
     bind(SRV_FILEIO, "fileio", fileio_handler);
     bind(SRV_CDVD, "cdvd", cdvd_handler);
+    bind(SRV_CDVDFS, "cdvdfsv", cdvfs_handler);
     bind(SRV_MCSERV, "mcserv", mcserv_handler);
     bind(SRV_PAD, "pad", pad_handler);
     bind(SRV_LOADFILE, "loadfile", loadfile_handler);

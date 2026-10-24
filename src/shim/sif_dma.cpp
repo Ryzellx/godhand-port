@@ -340,6 +340,16 @@ u32 kick(u32 sdd_addr, u32 count) {
                 reply.clear();
             }
             g_st.last_result = (u32)result;
+            // DMA balik IOP->EE: server CD (cdvdfsv) menulis struct hasil langsung ke
+            // buffer client di EE (paket menyimpan pointer-nya di +292). Tanpa ini klien
+            // membaca nol dan menganggap file gagal dibuka walau reply-nya benar.
+            {
+                sifrpc::EeWrite ew;
+                if (sifrpc::take_ee_writeback(ew)) {
+                    eebus::mem_write(ew.addr, ew.data.data(), ew.data.size());
+                    g_st.iop2ee++; g_st.iop2ee_bytes += ew.data.size();
+                }
+            }
             // Diagnosa loadfile: payload = struct {u32 size; char name[252]; ...}
             if (getenv("GH_SIF_DUMP") && send_size >= 256 && !payload.empty()) {
                 static int dc = 0;

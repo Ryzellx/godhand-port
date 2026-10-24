@@ -3,6 +3,7 @@
 #include "host_io.h"
 #include "sif_rpc.h"
 #include "memcard.h"
+#include "iso9660.h"
 #include <cstdlib>
 #include <filesystem>
 #include <cstdio>
@@ -198,6 +199,39 @@ int main(int argc, char** argv) {
     called = call(SRV_SJX, 2, u32s({0, 0x003E9080u, 0x00130040u, 2176}), rep, res);
     chk(called && rd32(rep, 0) == 0x00130040u, "sjx create DTX handle=iopbuf",
         "handle=" + hex32(rd32(rep, 0)));
+
+    // 17. cdvdfsv (SID 0x80000597): open file disc -> ukuran nyata dari ISO
+    //     Paket 300 B: nama NUL di +36, self-ptr EE di +292, mode di +296 (kontrak server
+    //     asli m09.elf/cdvdfsv.irx). Balasan: 4 B = ukuran, + struct 36 B ke [req+292].
+    {
+        iso9660::reset();
+        bool iso = iso9660::mount("");
+        chk(iso, "iso9660 mount", iso9660::image_path());
+        auto st2 = iso9660::stat("\\SYSTEM.CNF;1");
+        std::vector<u8> req(300, 0);
+        const char* nm = "\\SYSTEM.CNF;1";
+        std::memcpy(req.data() + 36, nm, std::strlen(nm));
+        u32 ee_dst = 0x003E0000u;
+        req[292] = (u8)ee_dst; req[293] = (u8)(ee_dst >> 8);
+        req[294] = (u8)(ee_dst >> 16); req[295] = (u8)(ee_dst >> 24);
+        called = call(SRV_CDVDFS, 0, req, rep, res);
+        chk(called && rd32(rep, 0) == st2.size && st2.size > 0, "cdvfs open SYSTEM.CNF = size",
+            hex32(rd32(rep, 0)) + " vs " + std::to_string(st2.size));
+        EeWrite ew;
+        bool have_wb = take_ee_writeback(ew);
+        chk(have_wb && ew.addr == ee_dst && ew.data.size() == 36 && rd32(ew.data, 4) == st2.size,
+            "cdvfs writeback 36 B: info+4 = ukuran", "addr=" + hex32(ew.addr));
+        // file tidak ada -> reply 0, bukan ukuran karangan
+        std::vector<u8> req2 = req;
+        std::memset(req2.data() + 36, 0, 256);
+        const char* nm2 = "\\TIDAK_ADA.BIN;1";
+        std::memcpy(req2.data() + 36, nm2, std::strlen(nm2));
+        called = call(SRV_CDVDFS, 0, req2, rep, res);
+        EeWrite ew2; take_ee_writeback(ew2);
+        chk(called && rd32(rep, 0) == 0, "cdvfs open file tidak ada = 0", hex32(rd32(rep, 0)));
+        chk(cdvfs_open_ok() == 1 && cdvfs_open_miss() == 1, "cdvfs counter ok/miss",
+            std::to_string(cdvfs_open_ok()) + "/" + std::to_string(cdvfs_open_miss()));
+    }
 
     const Stats& s = stats();
     std::printf("rpc stats: calls=%llu unknown=%llu in=%llu out=%llu\n",

@@ -89,6 +89,9 @@ Metode: static decompilation + reimplementation layer (jalur OpenGOAL-style).
       padman 45.952 · libsd 30.144 · SDRDRV 9.216 · sdhd 14.720 · snddrv 20.352 ·
       cri_adxi 76.928 B), iopheap alloc 2.256 B → 0x00130000 lalu 332.864 B → 0x00130900,
       deterministik 5/5 identik.
+- [ ] Phase 9 — boot native sampai render loop (LOG #18): end_func SIF0 aktif → 9 modul IOP,
+      CDVFS open 4/4 dari ISO9660 mentah. Dinding sekarang: ADXF status 2 (butuh jalur read CDVD
+      SID 0x80000595 fno=1) sebelum VU1/render bisa disentuh.
 - [ ] **PLAYABLE** 🎮 (stage st0 load + input + render loop)
 - [ ] **PLAYABLE** 🎮 (stage st0 load + input + render loop)
 
@@ -468,6 +471,70 @@ jalur completion yang belum kita emulasi. Konsekuensi jujur: `loadfile load=0` �
 `crt0_test 400M` md5 `f5e595a9…`, stop `clean-cap`, nol fault.
 
 **7) Tool baru:** `tools/peek_vma.py` (dump VMA→offset via PT_LOAD) untuk baca string/tabel ELF.
+
+### LOG 2026-10-24 #18 (Phase 9: end_func SIF0 = kunci dinding CDVD; CDVFS open dari ISO nyata)
+
+**1) Dinding lama (0x3F8674) = end_func RPC yang tidak pernah dipanggil**
+
+- Rutin libcdvd 0x398DD8: `lw v0,[0x3F8674] / bnez -> delay(4000)`. Flag di-set 0x39987C tepat
+  sebelum `sceSifCallRpc(cd=0x3F9810, fno=1, mode=1 async, ..., end_func=0x398580, end_param=0x3F9740)`.
+- Path pembersihnya ada di game sendiri: end_func 0x398580 (copy 2 blok dari paket) → `j 0x3984D8`
+  → `sw zero,[0x3F8674]`. Yaitu **jalur _request_end/SIF0**, bukan pekerjaan IOP.
+- Infra callback sudah ada di ee_cpu, tapi mati karena fault: `fault=pc_oor @0x398580 op=jr ra`.
+  Sebabnya cek akhir-loop `if (c.pc >= 0x02000000 || c.next_pc >= 0x02000000)` menabrak sentinel
+  kembali 0xFFFFFFFC. Fix: kecualikan sentinel saat callback aktif (dua bentuk: pc == sentinel
+  sesudah delay-slot, next_pc == sentinel saat `jr`), plus `GH_HALT_SKIP`.
+- end_func sekarang HIDUP default (`GH_RPC_ENDFUNC=0` mematikan).
+
+Bukti (crt0_test, angkanya dari run nyata):
+
+| Metrik | Sebelum | Sesudah |
+|---|---|---|
+| Flag 0x3F8674 | 1 (spin 7,1 M iterasi) | 0 |
+| loadfile modul IOP | 0 | **9** (sio2man 5248 · padman 45952 · libsd 30144 · SDRDRV 9216 · sdhd 14720 · snddrv 20352 · cri_adxi 76928 · mcman 103680 · mcserv 7744) |
+| bind / call RPC | 6 / 6 | 13 / 96 |
+| pc akhir 200 M | 0x3B0AF8 (spin) | clean-cap, tanpa fault |
+
+**2) ISO9660 mentah + backend CDVFS (bukan hasil ekstraksi)**
+
+- `src/shim/iso9660.{h,cpp}`: PVD sector 16, root record, walk direktori, `;1`, nama
+  case-insensitive, traversal ditolak. `iso_test` **18/18 PASS 5×** — isi file **byte-identik**
+  dengan hasil ekstraksi: SYSTEM.CNF 57 B, GODHAND.FST 32.944 B, IRX.IMS 314.304 B,
+  SLUS_215.03 3.607.008 B; `_DATA.AFS` 1.541.885.952 B (lba 2329).
+- SID **0x80000597 = cdvdfsv.irx** — dibuktikan dari modul IOP asli: `IOPRP310.IMG` →
+  `m09.elf` (33.440 B) mem-bind 0x592/0x593/0x595/0x597; handler server di **0x7AC** melakukan
+  dispatch menurut **panjang paket** (300 B = open), nama file NUL di **+36**, self-pointer EE di
+  **+292**, mode di **+296**, lalu menyalin struct hasil **36 B** ke [req+292] (DMA IOP→EE) dan
+  reply 4 B = nilai balik.
+- Implementasi: `sif_rpc` handler `cdvfs_handler` + `ee_writeback()` (DMA balik IOP→EE) yang
+  dieksekusi `sif_dma` setelah handler. Field yang TERBUKTI dibaca klien: info+4 = ukuran
+  (`cvFsOpen` 0x332C84 `lw a1,36(s1)`), dipakai juga sebagai nilai balik.
+- Bukti boot 200 M: `cdvfs: open_ok=4 open_miss=0` — `\MODULES\IRX.IMS;1`, `\0FLISTDV.DIR`,
+  `\_DATA.AFS;1` (2×). Sebelumnya semuanya MISS → `cvFsOpen #6: can not open file`.
+
+**3) Dinding baru (jujur, belum selesai)**
+
+- Boot 200 M berhenti di overlay yang di-TPA game ke **0x1FFC00**; loop 0x1FFC30:
+  `jal 0x395398 (vsync/stat)` + `jal 0x323000 (adxf_GetStat)` → `bne v0,s0` (v0=2, s0=3),
+  ~2,1 M iterasi + 2,15 M syscall 115.
+- Status ADX = **2**, belum 3 (ready). Buffer log CRI 0x3EADC0 kini **kosong** — error
+  "can't open GodHand.fst"/"adx is NULL" hilang, jadi open file sudah benar; yang kurang adalah
+  jalur **baca** data stream.
+- Belum dipetakan: SID 0x80000595 **fno=1** (paket 24 B: `{0,0,0,0x100,0x3F9740,0x3F9800}`)
+  dipanggil 2×; masih dijawab autostub nol = kandidat utama pembaca sektor/"Read_EE".
+- Anomali dicatat: 3 call ke SID **0x19720317** (bukan SID valid) berasal dari paket BIND yang
+  field sid-nya 0 (client data belum terisi) — perlu ditelusuri, belum diklaim sebagai fitur.
+- Catatan flake: `shim_test` (thread ping-pong) menggantung 1× di batch 180 s; 5 run berikutnya
+  PASS identik md5 cc2ea3b0. Diamati, belum diperbaiki.
+
+**4) Test floor 5× (md5 stdout identik, angka nyata)**
+
+`sif_test 41/41` (md5 73372ce0) · `sif_dma_test 10/10` (9e2b870b) · `shim_test ALL` (cc2ea3b0) ·
+`bus_test 20/20` (a06a36af) · `mmi_test 25/25` (accd196e) · `gif_test ALL` (ade54fea) ·
+`iso_test 18/18` (e8332a85) · `crt0_test 30M` (12465aeb) · `200M` (164dba8f) · `400M` (ac7a6f91),
+semua `stop=clean-cap`, nol fault.
+
+**5) Commit:** `505c972` (end_func) + commit ini (iso9660 + cdvfs).
 
 ## PROTOTYPE INTEL — God Hand Preview (Jun 20, 2006)
 Sumber: hiddenpalace.org, arsip 421.407.373 B (7z) berisi bin 1.261.928.448 B (MODE1/2048).
