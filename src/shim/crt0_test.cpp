@@ -406,6 +406,19 @@ int main(int argc, char** argv) {
     std::printf("sema-autosig=%llu (WaitSema virtual-event, Phase 7b.9)\n",
                 (unsigned long long)g_sema_autosig);
 
+    // Coverage per halaman (GH_COVER_RANGE=lo-hi) — butuh GH_HIST_EXACT=1
+    if (const char* cr = std::getenv("GH_COVER_RANGE")) {
+        std::string r(cr); size_t dash = r.find('-');
+        u32 lo = (u32)std::strtoul(r.substr(0, dash).c_str(), nullptr, 0);
+        u32 hi = (u32)std::strtoul(r.substr(dash + 1).c_str(), nullptr, 0);
+        std::fprintf(stderr, "[cover] 0x%08x..0x%08x per 0x100:\n", lo, hi);
+        for (u32 p = lo; p < hi; p += 0x100) {
+            u64 n = 0;
+            for (u32 a = p; a < p + 0x100; a += 4) n += g_hist[a >> 2];
+            if (n) std::fprintf(stderr, "  %08x %llu\n", p, (unsigned long long)n);
+        }
+    }
+
     // top-12 hot PC (sort: count desc, lalu alamat asc -> deterministik)
     struct H { u32 n, b; };
     std::vector<H> hs;

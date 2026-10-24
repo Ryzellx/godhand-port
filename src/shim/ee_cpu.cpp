@@ -507,6 +507,10 @@ bool run(Cpu& c, SyscallFn handler, u64 max_inst) {
         c.fault_op = inst;
         c.prev_inst = inst;
         if (c.trace) c.trace[c.trace_pos = (c.trace_pos + 1) & c.trace_mask] = cur_pc;
+        // Coverage eksak (GH_HIST_EXACT): histogram per instruksi tanpa sampling —
+        // dipakai memetakan fungsi mana di satu modul yang benar-benar dieksekusi.
+        static const bool hist_exact = std::getenv("GH_HIST_EXACT") != nullptr;
+        if (hist_exact && c.hist) c.hist[cur_pc >> 2]++;
 
         auto fault = [&](const char* why) { c.fault = why; c.fault_pc = c.pc; };
 
