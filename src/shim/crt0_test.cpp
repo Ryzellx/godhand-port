@@ -411,10 +411,11 @@ int main(int argc, char** argv) {
     // Phase 8 — bukti jalur SIF DMA -> RPC host (angka dari paket nyata)
     {
         const sifdma::Stats& d = sifdma::stats();
-        std::printf("sifdma: kicks=%llu entries=%llu ee2iop=%llu(%llu B) iop2ee=%llu(%llu B)\n",
+        std::printf("sifdma: kicks=%llu entries=%llu ee2iop=%llu(%llu B) iop2ee=%llu(%llu B) endfunc_queued=%llu\n",
                     (unsigned long long)d.kicks, (unsigned long long)d.entries,
                     (unsigned long long)d.ee2iop, (unsigned long long)d.ee2iop_bytes,
-                    (unsigned long long)d.iop2ee, (unsigned long long)d.iop2ee_bytes);
+                    (unsigned long long)d.iop2ee, (unsigned long long)d.iop2ee_bytes,
+                    (unsigned long long)d.cb_queued);
         std::printf("sifcmd: init=%llu reset=%llu sreg=%llu bind=%llu call=%llu end=%llu other=%llu short=%llu\n",
                     (unsigned long long)d.cid_init, (unsigned long long)d.cid_reset,
                     (unsigned long long)d.cid_sreg,

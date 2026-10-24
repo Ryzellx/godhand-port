@@ -146,7 +146,8 @@ add_executable(sif_dma_test
   src/shim/host_io.cpp
   src/shim/memcard.cpp
   src/shim/ee_bus.cpp
-  src/shim/ee_kernel.cpp)
+  src/shim/ee_kernel.cpp
+  src/shim/ee_cpu.cpp)   # eecpu::request_callback (end-func RPC, Phase 9)
 target_include_directories(sif_dma_test PRIVATE src/shim)
 target_link_libraries(sif_dma_test PRIVATE Threads::Threads)
 

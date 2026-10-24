@@ -18,7 +18,9 @@ using u8 = uint8_t; using u32 = uint32_t; using s32 = int32_t; using u64 = uint6
 enum : u32 {
     SRV_FILEIO   = 0x80000001u,   // FILEIO.IRX (IOPRP) @0x? -> RPC server fileio
     SRV_IOPHEAP  = 0x80000003u,   // heap IOP: sceSifAllocIopHeap/FreeIopHeap
-    SRV_CDVD     = 0x80000005u,   // belum terverifikasi dari modul (kandidat CDVDFSV)
+    SRV_CDVD     = 0x80000592u,   // CDVDFSV / cdvdman — SID kanonik ps2sdk; dikonfirmasi
+                                  // dari klien libcdvd game: bind di 0x3990C8 (jal 0x3b2f48)
+                                  // lalu sceSifCallRpc fno 0 (4 B -> 16 B reply) di 0x399168
     SRV_LOADFILE = 0x80000006u,   // IOPRP LOADFILE — fno 255 = word versi "3100"
     SRV_MCSERV   = 0x80000400u,   // mcman.irx @0x4300 + mcserv.irx @0x2e4
     SRV_SJX      = 0x90000200u,   // SJX/CRI sound engine (libsjx + cri_adxi)

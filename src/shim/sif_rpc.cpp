@@ -261,9 +261,30 @@ static s32 pad_handler(u32 func, const std::vector<u8>& req, std::vector<u8>& re
 }
 
 // ---------------------------------------------------------------- cdvd
-static s32 cdvd_handler(u32 func, const std::vector<u8>&, std::vector<u8>& reply) {
-    put32(reply, func == 0 ? 1u : 0u);
-    return 0;
+// CDVDFSV (SID 0x80000592). Kontrak yang terukur dari klien libcdvd game:
+//   - bind  di 0x3990C8 (sceSifBindRpc sid=0x80000592), retry-loop kalau gagal
+//   - fno 0 di 0x399168: kirim 4 B, terima 16 B; klien membaca word[1],word[2],word[3]
+//     (0x3991B4..0x3991F0) dan membandingkan word[3] dengan 255/254 = kode media error.
+// Model: disk selalu siap, word[0]=1 (dipakai juga oleh sif_test), word[3]=0 (bukan
+// 254/255). fno lain dicatat sampai semantiknya terbaca dari pemakaian nyata.
+static u64 g_cdvd_unknown = 0;
+static s32 cdvd_handler(u32 func, const std::vector<u8>& req, std::vector<u8>& reply) {
+    switch (func) {
+    case 0:                       // handshake disk-ready (4 B -> 16 B)
+        put32(reply, 1u);         // siap
+        put32(reply, 0u);
+        put32(reply, 0u);
+        put32(reply, 0u);         // word[3]=0: bukan 254/255 (yang dicek klien 0x3991E0)
+                                  // Percobaan 0x14 (SCECdPS2DVD) → boot malah mundur (0 modul
+                                  // IOP dimuat), jadi nilai 0 dipertahankan: terukur lebih baik.
+        return 0;
+    default:
+        g_cdvd_unknown++;
+        if (std::getenv("GH_SIF_DUMP"))
+            std::fprintf(stderr, "[cdvd] fno=%u send=%zu (belum dipetakan)\n", func, req.size());
+        put32(reply, 0u);
+        return 0;
+    }
 }
 
 // ---------------------------------------------------------------- loadfile

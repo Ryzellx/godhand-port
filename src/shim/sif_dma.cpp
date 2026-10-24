@@ -110,7 +110,18 @@ void finish_request(u32 pkt_addr, u32 cd, u32 extra_cid, u32 sd, u32 buf, u32 cb
         eebus::write32(ee + 44, cbuf);
     }
     if (cd) {
-        s32 sema = (s32)eebus::read32((cd & 0x1FFFFFFFu) + 8);
+        // sceSifCheckStatRpc (0x3B3328) mengembalikan 1 (= masih jalan) selama
+        //   cd->command(cd+4) == sd->[0x18]  DAN  (sd->[0x10] & 1).
+        // Di HW asli _request_end() menyalin command ke server-data dan membersihkan
+        // bit "processing" itu. Tanpa ini libcdvd menunggu selamanya di 0x398DD8
+        // (loop: CheckStatRpc != 0 -> delay 4000) walau paket sudah dibalas.
+        u32 c = cd & 0x1FFFFFFFu;
+        u32 sdp = eebus::read32(c + 0);
+        if (sdp) {
+            eebus::write32(sdp + 0x18, eebus::read32(c + 4));       // command tercatat
+            eebus::write32(sdp + 0x10, eebus::read32(sdp + 0x10) & ~1u);  // clear busy
+        }
+        s32 sema = (s32)eebus::read32(c + 8);
         if (sema >= 0 && sema < 256) {
             eekern::SignalSema(sema);
             g_st.sema_signals++;
@@ -354,9 +365,26 @@ u32 kick(u32 sdd_addr, u32 count) {
             }
             finish_request(pkt_addr, cd, 0, 0, 0, 0);
             g_st.call_replies++;
+            // end_func: sceSifCallRpc menyimpan end_func di cd+28 dan end_param di cd+32
+            // (terbaca di packet-builder 0x3B31A0..0x3B31C8: `sw t3,28(s1)` / `sw arg9,32(s1)`).
+            // HW asli memanggilnya dari _request_end di interrupt SIF0; native: antrean
+            // callback yang dieksekusi run-loop (lihat eecpu::request_callback).
+            if (cd) {
+                u32 cc = cd & 0x1FFFFFFFu;
+                u32 endf = eebus::read32(cc + 28);
+                if (endf) {
+                    eecpu::request_callback(endf, eebus::read32(cc + 32), (u32)result);
+                    g_st.cb_queued++;
+                }
+            }
             if (getenv("GH_SIF_DUMP"))
-                std::fprintf(stderr, "[sifdma] CALL sid=0x%08x fno=%u send=%u recv_cap=%u -> result=%d reply=%zu\n",
-                             sid, fno, send_size, recv_size, result, reply.size());
+            {
+                std::fprintf(stderr, "[sifdma] CALL sid=0x%08x fno=%u send=%u recv_cap=%u -> result=%d reply=%zu caller=0x%08x\n",
+                             sid, fno, send_size, recv_size, result, reply.size(), eecpu::g_syscall_pc);
+                std::fprintf(stderr, "   pkt:");
+                for (u32 k = 0; k < 64; k += 4) std::fprintf(stderr, " %u:%08x", k, rd(p, k));
+                std::fprintf(stderr, "\n");
+            }
             break;
         }
         case CID_RPC_END: g_st.cid_end++; break;

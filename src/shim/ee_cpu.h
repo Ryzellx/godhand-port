@@ -71,6 +71,19 @@ struct Cpu {
     // (dipakai probe: lihat register hasil satu call tanpa mengubah semantik).
     u32  halt_pc = 0;
     u64  halt_hits = 0;
+    // --- SIF RPC end-function callback (Phase 9) -------------------------------
+    // Di HW asli _request_end() (interrupt SIF0) memanggil end_func(end_param, result)
+    // di konteks EE setelah transfer selesai. Tanpa ini klien async (mis. libcdvd
+    // 0x3998A0 -> end_func 0x3A8580) menunggu flag-nya selamanya: terukur spin di
+    // 0x398DD8 karena [0x3F8674] tak pernah dinolkan.
+    u32  cb_func = 0, cb_arg = 0, cb_res = 0, cb_resume = 0;
+    bool cb_active = false;
+    // Konteks yang diselamatkan saat end_func dipanggil (interrupt SIF0 di HW asli
+    // menyimpan seluruh register file thread; tanpa ini register pemanggil rusak —
+    // terukur: sp jadi 0x023F86F0 = di luar RAM 32 MB).
+    struct CbCtx { u32 r[32][4]; u32 lo[4], hi[4], sa, facc, fcsr, f[32]; u32 resume; };
+    CbCtx cb_save[4];
+    int   cb_depth = 0;
     // trace_lo < pc < trace_hi -> cetak tiap instruksi di jendela itu ke stderr
     // (pc, word, GPR kunci). Nol efek pada state; hanya observasi.
     u32  trace_lo = 0, trace_hi = 0;
@@ -88,6 +101,10 @@ struct Cpu {
 // Phase 7b.9: census busy-delay loop yang di-fast-forward (idiom
 // addiu rt,rt,-1 / 4x nop / bne rt,rs,self). Semantik tetap eksak.
 inline u32 g_syscall_pc = 0;   // pc instruksi SYSCALL terakhir (diagnosa provenance)
+// antrean callback end-func (maks 8; dipakai sif_dma saat RPC non-block selesai)
+inline constexpr u32 CB_SENTINEL = 0xFFFFFFFCu;
+void request_callback(u32 func, u32 arg, u32 result);
+u32  pending_callbacks();
 extern u64 g_delay_loops;
 extern u64 g_delay_inst;
 

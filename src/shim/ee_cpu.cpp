@@ -147,6 +147,33 @@ static inline void fset(Cpu& c, u32 i, float v) { u32 b; std::memcpy(&b, &v, 4);
 u64 g_delay_loops = 0;
 u64 g_delay_inst  = 0;
 
+// EKSPERIMEN (belum tervalidasi): dispatch end_func di konteks EE membuat sp rusak
+// di 0x023F86F0 (di luar RAM 32 MB) — artinya model save/restore konteks di sini
+// belum meniru interrupt SIF0 dengan benar. Default MATI; hidupkan dgn GH_RPC_ENDFUNC=1
+// untuk melanjutkan riset. Antrean tetap diisi supaya bisa diukur (stats cb_queued).
+static bool g_endfunc_on = std::getenv("GH_RPC_ENDFUNC") != nullptr;
+
+// antrean callback end-func — ukuran kecil, FIFO, nol alokasi
+namespace {
+struct CbReq { u32 f, a, r; };
+CbReq g_cb[8];
+int g_cb_head = 0, g_cb_n = 0;
+}
+void request_callback(u32 func, u32 arg, u32 result) {
+    if (!func) return;
+    if (g_cb_n >= 8) { g_cb_head = (g_cb_head + 1) % 8; g_cb_n--; }   // buang tertua
+    g_cb[(g_cb_head + g_cb_n) % 8] = CbReq{func, arg, result};
+    g_cb_n++;
+}
+static bool take_callback(u32& f, u32& a, u32& r) {
+    if (g_cb_n <= 0) return false;
+    CbReq q = g_cb[g_cb_head];
+    g_cb_head = (g_cb_head + 1) % 8; g_cb_n--;
+    f = q.f; a = q.a; r = q.r;
+    return true;
+}
+u32 pending_callbacks() { return (u32)g_cb_n; }
+
 bool run(Cpu& c, SyscallFn handler, u64 max_inst) {
     while (c.instret < max_inst) {
         u32 cur_pc = c.pc;
@@ -214,6 +241,42 @@ bool run(Cpu& c, SyscallFn handler, u64 max_inst) {
         u32 inst = eebus::read32(c.pc);
         c.pc = c.next_pc;             // delay slot semantics: slot sudah diprefetch
         c.next_pc = c.pc + 4;
+        // --- end-func callback: kembali ke titik resume kalau end_func sudah `jr ra`
+        if (g_endfunc_on && c.cb_active && c.pc == CB_SENTINEL) {
+            if (c.cb_depth > 0) {
+                Cpu::CbCtx& s = c.cb_save[--c.cb_depth];
+                std::memcpy(c.r, s.r, sizeof(s.r));
+                std::memcpy(c.lo, s.lo, sizeof(s.lo));
+                std::memcpy(c.hi, s.hi, sizeof(s.hi));
+                std::memcpy(c.f, s.f, sizeof(s.f));
+                c.sa = s.sa; c.facc = s.facc; c.fcsr = s.fcsr;
+                c.pc = s.resume;
+            } else c.pc = c.cb_resume;
+            c.next_pc = c.pc + 4;
+            c.cb_active = false;
+        }
+        // --- end-func callback: panggil end_func(end_param, result) seperti _request_end
+        if (!c.cb_active && g_endfunc_on) {
+            u32 f, a, r;
+            if (take_callback(f, a, r)) {
+                c.cb_resume = c.pc;
+                if (c.cb_depth < 4) {
+                    Cpu::CbCtx& s = c.cb_save[c.cb_depth++];
+                    std::memcpy(s.r, c.r, sizeof(s.r));
+                    std::memcpy(s.lo, c.lo, sizeof(s.lo));
+                    std::memcpy(s.hi, c.hi, sizeof(s.hi));
+                    std::memcpy(s.f, c.f, sizeof(s.f));
+                    s.sa = c.sa; s.facc = c.facc; s.fcsr = c.fcsr; s.resume = c.cb_resume;
+                }
+                c.r[31][0] = CB_SENTINEL;   // ra = penanda kembali
+                c.r[4][0] = a;              // a0 = end_param
+                c.r[5][0] = r;              // a1 = result
+                c.pc = f; c.next_pc = f + 4;
+                c.cb_active = true;
+                std::fprintf(stderr, "[cb] end_func=0x%08x arg=0x%08x res=%d (dari pc=0x%08x)\n",
+                             f, a, (int)r, c.cb_resume);
+            }
+        }
         c.fault_op = inst;
         if (c.trace) c.trace[c.trace_pos = (c.trace_pos + 1) & c.trace_mask] = cur_pc;
 

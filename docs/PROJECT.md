@@ -418,6 +418,57 @@ bukan frame tergambar.
 `bus_test ALL` · `gif_test 6/6` · `adx_test` 1 file ISO 2ch/48 kHz rc=0 ·
 `crt0_test 30M` & `400M` deterministik (md5 `ac61eb8f4d8b`), stop `clean-cap` tanpa fault.
 
+### LOG 2026-10-24 #17 (Phase 9 lanjut: ABI sema EE dibetulkan — dinding CRI/ADX dipetakan, frontir baru = CDVD)
+
+**1) Dinding lama dijelaskan sampai akar (semua terukur, bukan dugaan)**
+
+- Loop 400 M–2 B instruksi **bukan hang acak**: 2,3 M panggilan `strlen` + 71 printf/iterasi
+  adalah **log error CRI yang dicetak terus-menerus**, bukan kerja render. Trace ring 60 K PC:
+  siklus `0x1FFCC8 → 0x395398 (vsync) → 0x3244C8 (adxf_GetStat) → bne status,3 → ulang`.
+- Register saat halt: `s1=0` → handle ADXF **NULL**; status handle (byte+1) = 4 ditulis di
+  **0x3289C4** setelah open-callback **0x330780** (cvFsOpen) balik 0.
+- Pesan aslinya ada di buffer log game 0x3EADC0 (dump `GH_DUMP_MEM`):
+  `E02110501 adxstmf_stat_exec: can't open GodHand.fst` — nama file di .rodata **0x42C6C8**.
+- Jadi wall = **stream CRI tidak bisa buka file**, bukan masalah MMI/SJUNI (yang sudah lewat).
+
+**2) BUG ABI NYATA: sema EE mengembalikan 0, seharusnya id**
+
+- Bukti di libcdvd: `0x3988D0 lw v1,[0x3F8668]` (id sema) → `jal PollSema` → `0x3988E0
+  bne v1,v0` = error kalau beda. Dengan return 0, cabang error **selalu** diambil.
+- Fix `src/shim/ee_kernel.cpp`: WaitSema/SignalSema/PollSema `return id`.
+- Efek terukur: boot **masuk protokol CDVD** (sebelumnya cuma "lewat" karena sema bohong).
+
+**3) SID server salah (dibetulkan, ada bukti di modul)**
+
+- `CDVD = 0x80000592` (konstanta lama 0x80000005 tak pernah dipakai game). Bukti klien:
+  bind di **0x3990C8**, call fno 0 (4 B → 16 B) di **0x399168**; balasan 16 B sekarang ditulis
+  (dulu 4 B). fno 0x14 (SCECdPS2DVD) dicoba → boot **malah mundur**, jadi word[3]=0 dipertahankan.
+- `0x80000001` = **libsd.irx** (bukan FILEIO) — ditemukan dari byte-scan modul; handler fileio
+  selama ini melayani panggilan libsd (fno 255 → -1).
+
+**4) Infrastruktur baru: end-func RPC (default MATI)**
+
+- Di HW, `_request_end()` memanggil `end_func(end_param,result)`. Ditambah
+  `eecpu::request_callback` + antrean + save/restore konteks (`GH_RPC_ENDFUNC=1` untuk hidup).
+- Percobaan pertama: `end_func=0x00398580` dipanggil, tapi `sp` jadi `0x023F86F0` (di luar RAM
+  32 MB) → model interrupt belum benar. **Dimatikan default**, jangan dipakai sampai tervalidasi.
+
+**5) Frontir sekarang (jujur, belum selesai)**
+
+400 M berhenti di `pc=0x003B0AF8` lewat `0x398DD8`: `while ([0x3F8674] != 0) delay(4000)` —
+flag diset di **0x39987C** sebelum RPC async ke sid **0x80000595**, dan hanya dibersihkan oleh
+jalur completion yang belum kita emulasi. Konsekuensi jujur: `loadfile load=0` — modul IOP
+**belum** dimuat lagi di jalur yang benar (jalur "9 modul" sebelumnya lolos karena sema salah).
+`gif kicks` tetap 16.384, `actions=0`. Berikutnya: layanan **CDVD** (0x80000592/593/595/597).
+
+**6) Test floor 5× berturut (md5 stdout identik)**
+
+`sif_test 36/36` · `sif_dma_test 10/10` · `shim_test ALL` · `bus_test ALL` · `mmi_test 25/25` ·
+`gif_test ALL` · `adx_test` (afsdump ISO) rc=0 · `crt0_test 30M` md5 `58507a7c…` ·
+`crt0_test 400M` md5 `f5e595a9…`, stop `clean-cap`, nol fault.
+
+**7) Tool baru:** `tools/peek_vma.py` (dump VMA→offset via PT_LOAD) untuk baca string/tabel ELF.
+
 ## PROTOTYPE INTEL — God Hand Preview (Jun 20, 2006)
 Sumber: hiddenpalace.org, arsip 421.407.373 B (7z) berisi bin 1.261.928.448 B (MODE1/2048).
 ELF: `SLPM_665.50` (JP preview), 3.450.144 B, md5 `b203e5aec76b009a1f4d594f869ca157`.

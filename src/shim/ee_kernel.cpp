@@ -279,6 +279,10 @@ s32 DeleteSema(s32 id) {
     return g_semas.erase(id) ? 0 : -1;
 }
 
+// ABI EE (ps2sdk kernel.h): WaitSema/PollSema/SignalSema mengembalikan **id sema**
+// kalau sukses, negatif (=E_SEMA_*) kalau gagal — BUKAN 0. Terukur di God Hand:
+// libcdvd @0x3988DC membandingkan `lw v1,[0x408668]` (id) dengan hasil PollSema dan
+// keluar error kalau beda -> cvFsOpen gagal -> adxstmf "can't open GodHand.fst".
 s32 WaitSema(s32 id) {
     std::unique_lock<std::mutex> lk(g_mu);
     auto it = g_semas.find(id);
@@ -286,7 +290,7 @@ s32 WaitSema(s32 id) {
     auto s = it->second;
     g_cv.wait(lk, [&] { return s->count > 0; });
     s->count--;
-    return 0;
+    return id;
 }
 
 s32 SignalSema(s32 id) {
@@ -295,7 +299,7 @@ s32 SignalSema(s32 id) {
     if (it == g_semas.end()) return -1;
     if (it->second->count < it->second->max) it->second->count++;
     g_cv.notify_all();
-    return 0;
+    return id;                    // ABI: id sema, bukan 0
 }
 
 s32 PollSema(s32 id) {
@@ -304,7 +308,7 @@ s32 PollSema(s32 id) {
     if (it == g_semas.end()) return -1;
     if (it->second->count <= 0) return -1;
     it->second->count--;
-    return 0;
+    return id;                    // ABI: id sema, bukan 0
 }
 
 s32 ReferSemaStatus(s32 id, s32* out) {
