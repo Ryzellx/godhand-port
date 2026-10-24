@@ -126,3 +126,10 @@ add_executable(sif_test
   src/shim/sif_rpc.cpp
   src/shim/host_io.cpp)
 target_include_directories(sif_test PRIVATE src/shim)
+
+# Phase 9a — CRI ADX decoder (audio backend) + verifikasi vs ffmpeg/vgmstream
+add_library(gh_adx STATIC src/shim/adx.cpp)
+target_include_directories(gh_adx PUBLIC src/shim)
+
+add_executable(adx_test src/shim/adx_test.cpp)
+target_link_libraries(adx_test PRIVATE gh_adx)
